@@ -1,0 +1,147 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="stat-number">{{ total_families }}</div>
+        <div class="stat-label">EA Families</div>
+    </div>
+    
+    <div class="stat-card">
+        <div class="stat-number">{{ total_instances }}</div>
+        <div class="stat-label">Instances</div>
+    </div>
+    
+    <div class="stat-card">
+        <div class="stat-number">{{ total_clauses }}</div>
+        <div class="stat-label">Total Clauses</div>
+    </div>
+    
+    <div class="stat-card">
+        <div class="stat-number">{{ versions|length }}</div>
+        <div class="stat-label">Versions</div>
+    </div>
+</div>
+
+<div class="card">
+    <h2>📊 System Overview</h2>
+    <p>Welcome to the EA Importer web interface. This system provides human-in-the-loop review and approval for Enterprise Agreement processing.</p>
+    
+    <div style="margin-top: 1.5rem;">
+        <a href="/families" class="btn">View EA Families</a>
+        <a href="/clustering" class="btn btn-warning">Review Clustering</a>
+        <a href="/versions" class="btn btn-success">Manage Versions</a>
+    </div>
+</div>
+
+{% if recent_families %}
+<div class="card">
+    <h3>📄 Recent Families</h3>
+    <table class="table">
+        <thead>
+            <tr>
+                <th>Title</th>
+                <th>Jurisdiction</th>
+                <th>Version</th>
+                <th>Created</th>
+                <th>Status</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for family in recent_families %}
+            <tr>
+                <td>{{ family.title }}</td>
+                <td>{{ family.jurisdiction }}</td>
+                <td>{{ family.version }}</td>
+                <td>{{ family.created_at.strftime('%Y-%m-%d') if family.created_at else '-' }}</td>
+                <td>
+                    {% if family.locked_at %}
+                        <span class="badge badge-success">Locked</span>
+                    {% else %}
+                        <span class="badge badge-warning">Unlocked</span>
+                    {% endif %}
+                </td>
+                <td>
+                    <a href="/families/{{ family.id }}" class="btn" style="font-size: 0.8rem; padding: 0.4rem 0.8rem;">View</a>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    
+    <div style="margin-top: 1rem;">
+        <a href="/families" class="btn">View All Families</a>
+    </div>
+</div>
+{% endif %}
+
+{% if versions %}
+<div class="card">
+    <h3>📦 Recent Versions</h3>
+    <table class="table">
+        <thead>
+            <tr>
+                <th>Version</th>
+                <th>Created</th>
+                <th>Families</th>
+                <th>Clauses</th>
+                <th>Status</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for version in versions %}
+            <tr>
+                <td><strong>{{ version.version }}</strong></td>
+                <td>{{ version.created_at[:10] if version.created_at else '-' }}</td>
+                <td>{{ version.total_families }}</td>
+                <td>{{ version.total_clauses }}</td>
+                <td>
+                    {% if version.is_locked %}
+                        <span class="badge badge-success">🔒 Locked</span>
+                    {% else %}
+                        <span class="badge badge-info">🔓 Unlocked</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if not version.is_locked %}
+                        <button class="btn btn-warning" style="font-size: 0.8rem; padding: 0.4rem 0.8rem;" 
+                                onclick="lockVersion('{{ version.version }}')">Lock</button>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    
+    <div style="margin-top: 1rem;">
+        <a href="/versions" class="btn">Manage All Versions</a>
+    </div>
+</div>
+{% endif %}
+
+<script>
+async function lockVersion(version) {
+    if (confirm(`Are you sure you want to lock version ${version}? This action cannot be undone.`)) {
+        try {
+            const response = await fetch(`/versions/${version}/lock`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                }
+            });
+            
+            if (response.ok) {
+                alert(`Version ${version} locked successfully`);
+                location.reload();
+            } else {
+                alert('Failed to lock version');
+            }
+        } catch (error) {
+            alert('Error: ' + error.message);
+        }
+    }
+}
+</script>
+{% endblock %}

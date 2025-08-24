@@ -1,0 +1,198 @@
+{% extends "base.html" %}
+
+{% block title %}{{ family.title }}{% endblock %}
+
+{% block content %}
+<div class="container mt-4">
+    <nav aria-label="breadcrumb">
+        <ol class="breadcrumb">
+            <li class="breadcrumb-item"><a href="/">Dashboard</a></li>
+            <li class="breadcrumb-item"><a href="/families">Families</a></li>
+            <li class="breadcrumb-item active">{{ family.title }}</li>
+        </ol>
+    </nav>
+
+    <div class="row">
+        <div class="col-md-8">
+            <div class="card mb-4">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h4 class="mb-0">{{ family.title }}</h4>
+                    {% if family.is_locked %}
+                        <span class="badge bg-success">Locked</span>
+                    {% else %}
+                        <span class="badge bg-warning">Draft</span>
+                    {% endif %}
+                </div>
+                <div class="card-body">
+                    {% if family.description %}
+                    <p class="card-text">{{ family.description }}</p>
+                    {% endif %}
+                    
+                    <div class="row">
+                        <div class="col-md-6">
+                            <strong>Sector:</strong> {{ family.sector or 'Not specified' }}<br>
+                            <strong>Created:</strong> {{ family.created_at.strftime('%Y-%m-%d %H:%M') if family.created_at else 'Unknown' }}<br>
+                            <strong>Gold Text Source:</strong> {{ family.gold_text_source_ea or 'Not set' }}
+                        </div>
+                        <div class="col-md-6">
+                            <strong>Family ID:</strong> <code>{{ family.id }}</code><br>
+                            <strong>Clauses:</strong> {{ clauses|length }}<br>
+                            <strong>Instances:</strong> {{ instances|length }}
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Clauses Section -->
+            <div class="card mb-4">
+                <div class="card-header">
+                    <h5 class="mb-0">
+                        <i class="fas fa-list"></i> Clauses ({{ clauses|length }})
+                    </h5>
+                </div>
+                <div class="card-body">
+                    {% if clauses %}
+                    <div class="table-responsive">
+                        <table class="table table-sm">
+                            <thead>
+                                <tr>
+                                    <th>Clause ID</th>
+                                    <th>Title</th>
+                                    <th>Level</th>
+                                    <th>Text Preview</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for clause in clauses[:20] %}
+                                <tr>
+                                    <td><code>{{ clause.clause_id }}</code></td>
+                                    <td>{{ clause.title or 'Untitled' }}</td>
+                                    <td>
+                                        <span class="badge bg-secondary">{{ clause.level }}</span>
+                                    </td>
+                                    <td>
+                                        <span class="text-muted small">
+                                            {{ clause.text[:80] }}{% if clause.text|length > 80 %}...{% endif %}
+                                        </span>
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                                {% if clauses|length > 20 %}
+                                <tr>
+                                    <td colspan="4" class="text-center text-muted">
+                                        ... and {{ clauses|length - 20 }} more clauses
+                                    </td>
+                                </tr>
+                                {% endif %}
+                            </tbody>
+                        </table>
+                    </div>
+                    {% else %}
+                    <div class="alert alert-info">
+                        <i class="fas fa-info-circle"></i> No clauses found for this family.
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+
+        <div class="col-md-4">
+            <!-- Actions Card -->
+            <div class="card mb-4">
+                <div class="card-header">
+                    <h6 class="mb-0">Actions</h6>
+                </div>
+                <div class="card-body">
+                    {% if not family.is_locked %}
+                    <button class="btn btn-success btn-sm mb-2 w-100" disabled>
+                        <i class="fas fa-lock"></i> Lock Family
+                    </button>
+                    <button class="btn btn-primary btn-sm mb-2 w-100" disabled>
+                        <i class="fas fa-edit"></i> Edit Family
+                    </button>
+                    {% endif %}
+                    <button class="btn btn-info btn-sm mb-2 w-100" disabled>
+                        <i class="fas fa-download"></i> Export Data
+                    </button>
+                    <button class="btn btn-secondary btn-sm w-100" disabled>
+                        <i class="fas fa-chart-line"></i> View Analytics
+                    </button>
+                </div>
+            </div>
+
+            <!-- Instances Card -->
+            <div class="card mb-4">
+                <div class="card-header">
+                    <h6 class="mb-0">
+                        <i class="fas fa-building"></i> Instances ({{ instances|length }})
+                    </h6>
+                </div>
+                <div class="card-body">
+                    {% if instances %}
+                    <div class="list-group list-group-flush">
+                        {% for instance in instances[:5] %}
+                        <div class="list-group-item px-0">
+                            <div class="d-flex justify-content-between align-items-start">
+                                <div>
+                                    <h6 class="mb-1">{{ instance.employer_name or 'Unknown Employer' }}</h6>
+                                    <p class="mb-1 text-muted small">{{ instance.agreement_title or 'No title' }}</p>
+                                    <small class="text-muted">
+                                        {% if instance.effective_date %}
+                                        Effective: {{ instance.effective_date.strftime('%Y-%m-%d') }}
+                                        {% endif %}
+                                    </small>
+                                </div>
+                                <span class="badge bg-primary">{{ instance.status or 'Active' }}</span>
+                            </div>
+                        </div>
+                        {% endfor %}
+                        {% if instances|length > 5 %}
+                        <div class="list-group-item px-0 text-center text-muted">
+                            ... and {{ instances|length - 5 }} more instances
+                        </div>
+                        {% endif %}
+                    </div>
+                    {% else %}
+                    <div class="alert alert-info mb-0">
+                        <small><i class="fas fa-info-circle"></i> No instances created yet.</small>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+
+            <!-- Statistics Card -->
+            <div class="card">
+                <div class="card-header">
+                    <h6 class="mb-0">Statistics</h6>
+                </div>
+                <div class="card-body">
+                    <div class="row text-center">
+                        <div class="col-6">
+                            <div class="border-end">
+                                <h4 class="text-primary">{{ clauses|length }}</h4>
+                                <small class="text-muted">Clauses</small>
+                            </div>
+                        </div>
+                        <div class="col-6">
+                            <h4 class="text-success">{{ instances|length }}</h4>
+                            <small class="text-muted">Instances</small>
+                        </div>
+                    </div>
+                    <hr>
+                    <div class="text-center">
+                        {% if family.gold_text_source_ea %}
+                        <small class="text-muted">
+                            <i class="fas fa-star text-warning"></i> Gold text selected
+                        </small>
+                        {% else %}
+                        <small class="text-muted">
+                            <i class="fas fa-exclamation-triangle text-warning"></i> Gold text not selected
+                        </small>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

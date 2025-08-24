@@ -63,6 +63,7 @@ setup(
         
         # Utilities
         "pydantic>=2.0.0",
+        "pydantic-settings>=2.0.0",
         "python-dotenv>=1.0.0",
         "requests>=2.31.0",
         "tqdm>=4.65.0",

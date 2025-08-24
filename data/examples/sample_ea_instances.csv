@@ -1,0 +1,6 @@
+instance_id,family_key,employer_name,employer_abn,fwc_id,commencement,nominal_expiry,pay_steps_json,notes
+INST_001,FAM_CONSTRUCTION_001,ABI Civil Contracting Services (NSW) Pty Ltd,12345678901,MA000123,2024-07-15,2027-07-14,"{""steps"": [""Level 1"", ""Level 2"", ""Level 3"", ""Level 4""], ""progression"": ""annual""}",Construction company in NSW
+INST_002,FAM_PROFESSIONAL_001,ABC Professional Services,23456789012,MA000124,2024-06-20,2027-06-19,"{""steps"": [""Graduate"", ""Associate"", ""Senior"", ""Principal""], ""progression"": ""performance""}",Professional services firm
+INST_003,FAM_MANUFACTURING_001,XYZ Manufacturing Pty Ltd,34567890123,MA000125,2024-08-01,2027-07-31,"{""steps"": [""Trainee"", ""Trade Level 1"", ""Trade Level 2"", ""Supervisor""], ""progression"": ""competency""}",Manufacturing company
+INST_004,FAM_HEALTHCARE_001,Regional Healthcare Services,45678901234,MA000126,2024-05-30,2027-05-29,"{""steps"": [""Assistant"", ""Grade 1"", ""Grade 2"", ""Senior""], ""progression"": ""annual""}",Regional healthcare provider
+INST_005,FAM_TRANSPORT_001,National Transport Co,56789012345,MA000127,2024-07-10,2027-07-09,"{""steps"": [""Driver Grade 1"", ""Driver Grade 2"", ""Senior Driver"", ""Team Leader""], ""progression"": ""annual""}",National transport company

@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+
+{% block title %}EA Families{% endblock %}
+
+{% block content %}
+<div class="container mt-4">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h1>Enterprise Agreement Families</h1>
+        <div>
+            <span class="badge bg-info fs-6">{{ family_data|length }} families</span>
+        </div>
+    </div>
+
+    {% if family_data %}
+    <div class="row">
+        {% for item in family_data %}
+        <div class="col-md-6 col-lg-4 mb-4">
+            <div class="card h-100">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h6 class="mb-0 text-truncate">{{ item.family.title }}</h6>
+                    <span class="badge bg-secondary">{{ item.clause_count }} clauses</span>
+                </div>
+                <div class="card-body">
+                    <p class="card-text text-muted small">
+                        <strong>ID:</strong> {{ item.family.id[:8] }}...<br>
+                        <strong>Created:</strong> {{ item.family.created_at.strftime('%Y-%m-%d %H:%M') if item.family.created_at else 'Unknown' }}<br>
+                        <strong>Status:</strong> 
+                        {% if item.family.is_locked %}
+                            <span class="badge bg-success">Locked</span>
+                        {% else %}
+                            <span class="badge bg-warning">Draft</span>
+                        {% endif %}
+                    </p>
+                    
+                    {% if item.family.description %}
+                    <p class="card-text">{{ item.family.description[:100] }}{% if item.family.description|length > 100 %}...{% endif %}</p>
+                    {% endif %}
+                    
+                    <div class="mt-auto">
+                        <small class="text-muted">
+                            <i class="fas fa-tag"></i> {{ item.family.sector or 'No sector' }}
+                        </small>
+                    </div>
+                </div>
+                <div class="card-footer">
+                    <a href="/families/{{ item.family.id }}" class="btn btn-primary btn-sm">
+                        <i class="fas fa-eye"></i> View Details
+                    </a>
+                    {% if not item.family.is_locked %}
+                    <button class="btn btn-outline-secondary btn-sm" disabled>
+                        <i class="fas fa-edit"></i> Edit
+                    </button>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="alert alert-info">
+        <h4><i class="fas fa-info-circle"></i> No families found</h4>
+        <p>No Enterprise Agreement families have been created yet. Run the clustering pipeline to generate family candidates.</p>
+        <a href="/clustering" class="btn btn-primary">
+            <i class="fas fa-sitemap"></i> Review Clustering Results
+        </a>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

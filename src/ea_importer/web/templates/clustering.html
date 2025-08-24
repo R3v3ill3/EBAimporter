@@ -1,0 +1,173 @@
+{% extends "base.html" %}
+
+{% block title %}Clustering Review{% endblock %}
+
+{% block content %}
+<div class="container mt-4">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h1>
+            <i class="fas fa-sitemap"></i> Clustering Review
+        </h1>
+        <div>
+            <button class="btn btn-primary" disabled>
+                <i class="fas fa-play"></i> Run New Clustering
+            </button>
+        </div>
+    </div>
+
+    <div class="alert alert-info">
+        <h5><i class="fas fa-info-circle"></i> About Clustering</h5>
+        <p class="mb-0">
+            Clustering groups similar Enterprise Agreements into families based on document similarity. 
+            Review the results below and approve clusters to create EA families.
+        </p>
+    </div>
+
+    {% if clustering_reports %}
+    <div class="card">
+        <div class="card-header">
+            <h5 class="mb-0">Clustering Results ({{ clustering_reports|length }})</h5>
+        </div>
+        <div class="card-body">
+            <div class="table-responsive">
+                <table class="table table-hover">
+                    <thead>
+                        <tr>
+                            <th>Run ID</th>
+                            <th>Algorithm</th>
+                            <th>Documents</th>
+                            <th>Clusters</th>
+                            <th>Timestamp</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for report in clustering_reports %}
+                        <tr>
+                            <td>
+                                <code>{{ report.run_id[:8] }}...</code>
+                            </td>
+                            <td>
+                                <span class="badge bg-secondary">{{ report.algorithm }}</span>
+                            </td>
+                            <td>
+                                <span class="badge bg-info">{{ report.num_documents }}</span>
+                            </td>
+                            <td>
+                                <span class="badge bg-primary">{{ report.num_clusters }}</span>
+                            </td>
+                            <td>
+                                <small class="text-muted">
+                                    {% if report.timestamp %}
+                                        {{ report.timestamp[:10] }} {{ report.timestamp[11:19] }}
+                                    {% else %}
+                                        Unknown
+                                    {% endif %}
+                                </small>
+                            </td>
+                            <td>
+                                <a href="/clustering/{{ report.run_id }}" class="btn btn-sm btn-primary">
+                                    <i class="fas fa-eye"></i> Review
+                                </a>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- Quick Stats -->
+    <div class="row mt-4">
+        <div class="col-md-3">
+            <div class="card text-center">
+                <div class="card-body">
+                    <h4 class="text-primary">{{ clustering_reports|length }}</h4>
+                    <small class="text-muted">Clustering Runs</small>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card text-center">
+                <div class="card-body">
+                    <h4 class="text-info">
+                        {% set total_docs = clustering_reports|map(attribute='num_documents')|sum %}
+                        {{ total_docs }}
+                    </h4>
+                    <small class="text-muted">Documents Processed</small>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card text-center">
+                <div class="card-body">
+                    <h4 class="text-success">
+                        {% set total_clusters = clustering_reports|map(attribute='num_clusters')|sum %}
+                        {{ total_clusters }}
+                    </h4>
+                    <small class="text-muted">Clusters Generated</small>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card text-center">
+                <div class="card-body">
+                    <h4 class="text-warning">
+                        {% set algorithms = clustering_reports|map(attribute='algorithm')|unique|list %}
+                        {{ algorithms|length }}
+                    </h4>
+                    <small class="text-muted">Algorithms Used</small>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    {% else %}
+    <div class="alert alert-warning">
+        <h4><i class="fas fa-exclamation-triangle"></i> No clustering results found</h4>
+        <p>
+            No clustering reports have been generated yet. Run the clustering pipeline to analyze 
+            document similarities and generate family candidates.
+        </p>
+        <div class="mt-3">
+            <button class="btn btn-primary" disabled>
+                <i class="fas fa-play"></i> Run Clustering Pipeline
+            </button>
+            <small class="text-muted d-block mt-2">
+                <em>Use the CLI command: <code>ea-agent cluster run</code></em>
+            </small>
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- Help Section -->
+    <div class="mt-4">
+        <div class="card">
+            <div class="card-header">
+                <h6 class="mb-0">
+                    <i class="fas fa-question-circle"></i> Clustering Algorithms
+                </h6>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-6">
+                        <h6>MinHash Threshold</h6>
+                        <p class="small text-muted">
+                            Groups documents with similarity above a threshold. 
+                            Good for finding exact or near-exact matches.
+                        </p>
+                    </div>
+                    <div class="col-md-6">
+                        <h6>HDBSCAN</h6>
+                        <p class="small text-muted">
+                            Density-based clustering that automatically determines 
+                            the number of clusters and handles outliers well.
+                        </p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
