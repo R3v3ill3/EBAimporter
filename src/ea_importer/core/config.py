@@ -36,6 +36,14 @@ class DatabaseConfig(BaseSettings):
     echo: bool = Field(default=False, description="Enable SQLAlchemy query logging")
     pool_size: int = Field(default=10, description="Connection pool size")
     max_overflow: int = Field(default=20, description="Maximum pool overflow")
+    sslmode: str = Field(default="prefer", description="PostgreSQL SSL mode (e.g., require, prefer)")
+    connect_timeout: int = Field(default=10, description="Connection timeout in seconds")
+    pool_recycle: int = Field(default=1800, description="Recycle connections after this many seconds")
+    keepalives: bool = Field(default=True, description="Enable TCP keepalives")
+    keepalives_idle: int = Field(default=30, description="Seconds of inactivity before keepalive probes")
+    keepalives_interval: int = Field(default=10, description="Seconds between keepalive probes")
+    keepalives_count: int = Field(default=5, description="Number of failed keepalive probes before drop")
+    prefer_ipv4: bool = Field(default=False, description="Prefer IPv4 addresses for database connections")
     
     class Config:
         env_prefix = "DB_"
