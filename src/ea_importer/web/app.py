@@ -24,7 +24,7 @@ from datetime import datetime
 
 from ..core.config import get_settings
 from ..core.logging import get_logger
-from ..database import get_db_session
+from ..database import get_db_session, setup_database
 from ..models import (
     DocumentDB, ClauseDB, FingerprintDB, 
     ClusterCandidateDB, FamilyDB, InstanceDB, OverlayDB
@@ -47,6 +47,17 @@ app = FastAPI(
     docs_url="/api/docs",
     redoc_url="/api/redoc"
 )
+
+# Ensure database is initialized at startup (creates tables if missing)
+@app.on_event("startup")
+async def on_startup() -> None:
+    try:
+        logger.info("Initializing database on startup")
+        setup_database()
+        logger.info("Database ready")
+    except Exception as e:
+        logger.error(f"Database initialization failed: {e}")
+        # Do not raise here to allow the app to start and show error pages
 
 # Add middleware
 app.add_middleware(GZipMiddleware, minimum_size=1000)
