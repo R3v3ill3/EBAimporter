@@ -9,6 +9,8 @@ Handles PDF text extraction with multiple fallback strategies:
 Supports multiple PDF libraries and OCR engines for maximum compatibility.
 """
 
+from __future__ import annotations
+
 import os
 import io
 import logging

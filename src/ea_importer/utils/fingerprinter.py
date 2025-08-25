@@ -11,6 +11,8 @@ Handles multiple fingerprinting strategies for document similarity detection:
 Designed for large-scale document corpus analysis.
 """
 
+from __future__ import annotations
+
 import hashlib
 import pickle
 import logging
