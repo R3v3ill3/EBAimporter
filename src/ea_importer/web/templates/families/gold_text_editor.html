@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+
+{% block title %}Gold Text Editor{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
+    <h1 class="h2"><i class="fas fa-pen-to-square me-2"></i>Gold Text Editor: {{ family.family_name }}</h1>
+    <div class="btn-toolbar mb-2 mb-md-0">
+        <a href="/families/{{ family.id }}" class="btn btn-sm btn-outline-secondary">Back</a>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">Clause Groups</div>
+            <div class="card-body">
+                {% if clause_groups %}
+                <div class="accordion" id="clauseAccordion">
+                    {% for clause_num, variants in clause_groups.items() %}
+                    <div class="accordion-item">
+                        <h2 class="accordion-header" id="heading{{ clause_num }}">
+                            <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#collapse{{ clause_num }}">
+                                Clause {{ clause_num }}
+                            </button>
+                        </h2>
+                        <div id="collapse{{ clause_num }}" class="accordion-collapse collapse" data-bs-parent="#clauseAccordion">
+                            <div class="accordion-body">
+                                {% for variant in variants %}
+                                <div class="mb-3">
+                                    <div class="fw-bold">Document {{ variant.document_id }}</div>
+                                    <div class="small text-muted">{{ variant.clause.heading }}</div>
+                                    <div class="border rounded p-2 small">{{ variant.clause.text }}</div>
+                                </div>
+                                {% endfor %}
+                            </div>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+                {% else %}
+                <p class="text-muted">No clauses available.</p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">Current Gold Text (JSON)</div>
+            <div class="card-body">
+                <form id="goldTextForm">
+                    <div class="mb-3">
+                        <textarea name="gold_text_data" class="form-control" rows="16">{{ current_gold_text | tojson(indent=2) }}</textarea>
+                    </div>
+                    <button type="button" class="btn btn-primary" onclick="saveGoldText()">Save</button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script>
+function saveGoldText() {
+    const form = document.getElementById('goldTextForm');
+    const formData = new FormData(form);
+    fetch(window.location.pathname, { method: 'POST', body: formData })
+        .then(r => r.json())
+        .then(data => {
+            if (data.success) {
+                alert('Gold text saved');
+            } else {
+                alert('Failed to save: ' + (data.message || 'Unknown error'));
+            }
+        })
+        .catch(err => alert('Error: ' + err));
+}
+</script>
+{% endblock %}
+

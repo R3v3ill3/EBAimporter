@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+
+{% block title %}Families{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
+    <h1 class="h2"><i class="fas fa-sitemap me-2"></i>Families</h1>
+    <div class="btn-toolbar mb-2 mb-md-0">
+        <a href="/" class="btn btn-sm btn-outline-secondary">Back</a>
+    </div>
+</div>
+
+<div class="row mb-3">
+    <div class="col">
+        <div class="card">
+            <div class="card-body">
+                <div class="row text-center">
+                    <div class="col">
+                        <div class="text-muted">Total Families</div>
+                        <div class="h4">{{ total_stats.total_families }}</div>
+                    </div>
+                    <div class="col">
+                        <div class="text-muted">Total Instances</div>
+                        <div class="h4">{{ total_stats.total_instances }}</div>
+                    </div>
+                    <div class="col">
+                        <div class="text-muted">Total Overlays</div>
+                        <div class="h4">{{ total_stats.total_overlays }}</div>
+                    </div>
+                    <div class="col">
+                        <div class="text-muted">Avg Family Size</div>
+                        <div class="h4">{{ '%.1f'|format(total_stats.avg_family_size) }}</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    </div>
+
+<div class="card">
+    <div class="card-body">
+        {% if family_stats %}
+        <div class="table-responsive">
+            <table class="table table-striped">
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Name</th>
+                        <th>Documents</th>
+                        <th>Instances</th>
+                        <th>Overlays</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for stat in family_stats %}
+                    <tr>
+                        <td>{{ stat.family.id }}</td>
+                        <td>{{ stat.family.family_name }}</td>
+                        <td>{{ stat.total_documents }}</td>
+                        <td>{{ stat.instance_count }}</td>
+                        <td>{{ stat.overlay_count }}</td>
+                        <td><a href="/families/{{ stat.family.id }}" class="btn btn-sm btn-primary">View</a></td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <p class="text-muted">No families available.</p>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}
+
