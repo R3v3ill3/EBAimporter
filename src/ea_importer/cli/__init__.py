@@ -1,517 +1,360 @@
-"""
-Command-line interface for EA Importer.
-"""
-
-import sys
-from pathlib import Path
-from typing import Optional, List
-import json
+"""CLI interface for EA Importer system."""
 
 import typer
-from rich.console import Console
-from rich.table import Table
-from rich.progress import Progress
-from rich import print as rprint
+from pathlib import Path
+from typing import Optional
+import logging
 
-from ..core.config import get_settings
-from ..core.logging import setup_logging
-from ..database import init_database, get_database_manager
-from ..pipeline import create_ingest_pipeline
-from ..pipeline.clustering import create_ea_clusterer
-from ..utils.fingerprinter import create_text_fingerprinter
-
-
-# Create the main app
-app = typer.Typer(
-    name="ea-agent",
-    help="Australian Enterprise Agreement Ingestion & Corpus Builder",
-    add_completion=False
+from ..core import setup_logging, get_logger
+from ..utils import (
+    PDFProcessor, TextCleaner, TextSegmenter, 
+    Fingerprinter, RatesRulesExtractor, QACalculator
 )
+from ..pipeline import ClusteringEngine, FamilyBuilder, InstanceManager
+from ..utils.version_control import VersionController
+from .csv_commands import csv_app
+from .test_commands import test_app
 
-# Create subcommands
-ingest_app = typer.Typer(help="Document ingestion commands")
-cluster_app = typer.Typer(help="Clustering and family detection commands")
-family_app = typer.Typer(help="Family building and gold text selection commands")
-qa_app = typer.Typer(help="Quality assurance and testing commands")
-corpus_app = typer.Typer(help="Corpus management and versioning commands")
-db_app = typer.Typer(help="Database management commands")
-web_app = typer.Typer(help="Web interface commands")
+app = typer.Typer(help="EA Importer - Enterprise Agreement Processing System")
+logger = get_logger(__name__)
+
+# Subcommands
+ingest_app = typer.Typer(help="PDF ingestion commands")
+cluster_app = typer.Typer(help="Clustering commands")
+family_app = typer.Typer(help="Family management commands")
+qa_app = typer.Typer(help="Quality assurance commands")
+version_app = typer.Typer(help="Version control commands")
 
 app.add_typer(ingest_app, name="ingest")
 app.add_typer(cluster_app, name="cluster")
 app.add_typer(family_app, name="family")
 app.add_typer(qa_app, name="qa")
-app.add_typer(corpus_app, name="corpus")
-app.add_typer(db_app, name="db")
-app.add_typer(web_app, name="web")
+app.add_typer(version_app, name="version")
+app.add_typer(csv_app, name="csv")
+app.add_typer(test_app, name="test")
 
-console = Console()
-
-
-def setup_cli_logging(verbose: bool = False, log_file: Optional[Path] = None):
-    """Set up logging for CLI operations."""
-    log_level = "DEBUG" if verbose else "INFO"
-    setup_logging(log_level=log_level, log_file=log_file)
-
-
-@app.callback()
-def main(
-    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose logging"),
-    log_file: Optional[Path] = typer.Option(None, "--log-file", help="Log file path"),
-    config_file: Optional[Path] = typer.Option(None, "--config", help="Configuration file path")
+@app.command()
+def setup(
+    database_url: Optional[str] = typer.Option(None, "--db", help="Database URL"),
+    create_dirs: bool = typer.Option(True, help="Create data directories")
 ):
-    """
-    EA Agent - Australian Enterprise Agreement Ingestion & Corpus Builder
+    """Initialize EA Importer system."""
+    setup_logging()
+    logger.info("Setting up EA Importer system")
     
-    A comprehensive system for processing, clustering, and querying Enterprise Agreements.
-    """
-    setup_cli_logging(verbose, log_file)
+    if create_dirs:
+        from ..core.config import get_settings
+        settings = get_settings()
+        settings.create_directories()
+        typer.echo("✅ Created data directories")
     
-    if config_file and config_file.exists():
-        # TODO: Load configuration from file
-        pass
+    if database_url:
+        typer.echo(f"Database URL configured: {database_url}")
+    
+    typer.echo("✅ EA Importer setup completed")
 
-
-# ============================================================================
-# INGESTION COMMANDS
-# ============================================================================
-
-@ingest_app.command("run")
-def ingest_run(
+@ingest_app.command()
+def run(
     input_dir: Path = typer.Argument(..., help="Directory containing PDF files"),
-    output_dir: Optional[Path] = typer.Option(None, "--out", help="Output directory (default: data/eas)"),
-    force_ocr: bool = typer.Option(False, "--force-ocr", help="Force OCR even if text layer exists"),
-    max_files: Optional[int] = typer.Option(None, "--max-files", help="Maximum number of files to process"),
-    file_pattern: str = typer.Option("*.pdf", "--pattern", help="File pattern to match"),
+    output_dir: Optional[Path] = typer.Option(None, "--output", help="Output directory"),
+    force_ocr: bool = typer.Option(False, "--force-ocr", help="Force OCR processing"),
+    max_files: Optional[int] = typer.Option(None, "--max-files", help="Maximum files to process")
 ):
-    """
-    Run the main ingestion pipeline on a directory of PDF files.
-    
-    This will:
-    1. Extract text from PDFs (with OCR if needed)
-    2. Clean and normalize text
-    3. Segment into clauses
-    4. Generate fingerprints
-    5. Save outputs and update database
-    """
-    settings = get_settings()
+    """Run PDF ingestion pipeline."""
+    setup_logging()
     
     if not input_dir.exists():
-        rprint(f"[red]Error: Input directory does not exist: {input_dir}[/red]")
+        typer.echo(f"❌ Input directory not found: {input_dir}")
         raise typer.Exit(1)
     
-    if output_dir:
-        settings.data_root = output_dir
+    output_dir = output_dir or Path("data/eas")
     
-    # Ensure directories exist
-    settings.ensure_directories()
+    # Process PDFs
+    processor = PDFProcessor()
+    cleaner = TextCleaner()
+    segmenter = TextSegmenter()
+    fingerprinter = Fingerprinter()
     
-    # Create and run pipeline
-    pipeline = create_ingest_pipeline()
-    
-    rprint(f"[bold blue]Starting EA ingestion pipeline[/bold blue]")
-    rprint(f"Input directory: [cyan]{input_dir}[/cyan]")
-    rprint(f"Output directory: [cyan]{settings.data_root}[/cyan]")
-    rprint(f"File pattern: [cyan]{file_pattern}[/cyan]")
-    
-    if force_ocr:
-        rprint(f"[yellow]OCR will be forced for all documents[/yellow]")
-    
+    pdf_files = list(input_dir.glob("*.pdf"))
     if max_files:
-        rprint(f"[yellow]Processing limited to {max_files} files[/yellow]")
+        pdf_files = pdf_files[:max_files]
     
-    # Run the pipeline
-    stats = pipeline.batch_ingest(
-        input_dir=input_dir,
-        file_pattern=file_pattern,
-        force_ocr=force_ocr,
-        max_files=max_files
-    )
+    typer.echo(f"Processing {len(pdf_files)} PDF files...")
     
-    # Display results
-    display_ingest_results(stats)
+    processed_count = 0
+    failed_count = 0
+    
+    for pdf_file in pdf_files:
+        try:
+            # Process PDF
+            document = processor.process_pdf(pdf_file, force_ocr=force_ocr)
+            
+            # Clean text
+            cleaned_document = cleaner.clean_document(document)
+            
+            # Segment clauses
+            clauses = segmenter.segment_document(cleaned_document)
+            
+            # Generate fingerprint
+            fingerprint = fingerprinter.fingerprint_document(document)
+            
+            # Save outputs
+            ea_id = document.metadata['ea_id']
+            
+            # Save text
+            text_dir = output_dir / "text"
+            text_dir.mkdir(parents=True, exist_ok=True)
+            with open(text_dir / f"{ea_id}.txt", 'w') as f:
+                f.write(document.full_text)
+            
+            # Save clauses
+            clauses_dir = output_dir / "clauses"
+            clauses_dir.mkdir(parents=True, exist_ok=True)
+            with open(clauses_dir / f"{ea_id}.jsonl", 'w') as f:
+                import json
+                for clause in clauses:
+                    clause_data = {
+                        'ea_id': clause.ea_id,
+                        'clause_id': clause.clause_id,
+                        'heading': clause.heading,
+                        'text': clause.text,
+                        'path': clause.path,
+                        'hash_sha256': clause.hash_sha256,
+                        'token_count': clause.token_count
+                    }
+                    f.write(json.dumps(clause_data) + '\n')
+            
+            # Save fingerprint
+            fp_dir = output_dir / "fp"
+            fingerprinter.save_fingerprint(fingerprint, fp_dir)
+            
+            processed_count += 1
+            typer.echo(f"✅ Processed: {pdf_file.name} -> {ea_id}")
+            
+        except Exception as e:
+            failed_count += 1
+            typer.echo(f"❌ Failed: {pdf_file.name} - {e}")
+    
+    typer.echo(f"\n📊 Results: {processed_count} processed, {failed_count} failed")
 
-
-def display_ingest_results(stats):
-    """Display ingestion results in a formatted table."""
-    table = Table(title="Ingestion Results")
-    
-    table.add_column("Metric", style="cyan", no_wrap=True)
-    table.add_column("Value", style="magenta")
-    
-    table.add_row("Run ID", stats.run_id)
-    table.add_row("Files Found", str(stats.files_found))
-    table.add_row("Files Processed", str(stats.files_processed))
-    table.add_row("Files Succeeded", str(stats.files_succeeded))
-    table.add_row("Files Failed", str(stats.files_failed))
-    table.add_row("Success Rate", f"{stats.success_rate:.1%}")
-    table.add_row("Total Pages", str(stats.total_pages))
-    table.add_row("Total Clauses", str(stats.total_clauses))
-    table.add_row("Total Characters", f"{stats.total_text_chars:,}")
-    
-    if stats.duration_seconds:
-        table.add_row("Duration", f"{stats.duration_seconds:.1f} seconds")
-    
-    console.print(table)
-    
-    # Show failures if any
-    if stats.files_failed > 0:
-        rprint(f"\n[red]{stats.files_failed} files failed processing:[/red]")
-        for stat in stats.processing_stats:
-            if not stat.success:
-                rprint(f"  • {stat.ea_id}: {stat.error_message}")
-
-
-@ingest_app.command("status")
-def ingest_status():
-    """Show status of the ingestion pipeline."""
-    settings = get_settings()
-    
-    # Count files in various directories
-    stats = {
-        "Raw PDFs": len(list(settings.raw_eas_dir.glob("*.pdf"))) if settings.raw_eas_dir.exists() else 0,
-        "Processed Text": len(list(settings.text_dir.glob("*.txt"))) if settings.text_dir.exists() else 0,
-        "Clause Files": len(list(settings.clauses_dir.glob("*.jsonl"))) if settings.clauses_dir.exists() else 0,
-        "Fingerprints": len(list(settings.fingerprints_dir.glob("*.sha256"))) if settings.fingerprints_dir.exists() else 0,
-    }
-    
-    table = Table(title="Ingestion Status")
-    table.add_column("Category", style="cyan")
-    table.add_column("Count", style="magenta")
-    
-    for category, count in stats.items():
-        table.add_row(category, str(count))
-    
-    console.print(table)
-
-
-# ============================================================================
-# CLUSTERING COMMANDS
-# ============================================================================
-
-@cluster_app.command("run")
-def cluster_run(
-    clauses_dir: Optional[Path] = typer.Option(None, "--clauses", help="Directory containing clause files"),
-    output_dir: Optional[Path] = typer.Option(None, "--out", help="Output directory for cluster reports"),
-    threshold: float = typer.Option(0.9, "--threshold", help="Similarity threshold for clustering"),
-    algorithm: str = typer.Option("adaptive", "--algorithm", help="Clustering algorithm (adaptive, minhash, hdbscan, dbscan)"),
+@cluster_app.command()
+def run(
+    clauses_dir: Path = typer.Argument(..., help="Directory containing clause files"),
+    algorithm: str = typer.Option("adaptive", help="Clustering algorithm"),
+    threshold: float = typer.Option(0.9, help="Similarity threshold"),
+    output_dir: Optional[Path] = typer.Option(None, help="Output directory")
 ):
-    """
-    Run clustering to group similar EAs into families.
+    """Run document clustering."""
+    setup_logging()
     
-    This analyzes document fingerprints to identify groups of similar
-    Enterprise Agreements that should be treated as the same family.
-    """
-    settings = get_settings()
-    
-    if clauses_dir is None:
-        clauses_dir = settings.clauses_dir
-    
-    if output_dir is None:
-        output_dir = settings.reports_dir / "clusters"
-    
-    if not clauses_dir.exists():
-        rprint(f"[red]Error: Clauses directory does not exist: {clauses_dir}[/red]")
-        raise typer.Exit(1)
-    
-    rprint(f"[bold blue]Starting EA clustering[/bold blue]")
-    rprint(f"Clauses directory: [cyan]{clauses_dir}[/cyan]")
-    rprint(f"Output directory: [cyan]{output_dir}[/cyan]")
-    rprint(f"Algorithm: [cyan]{algorithm}[/cyan]")
-    
-    if algorithm != "adaptive":
-        rprint(f"Threshold: [cyan]{threshold}[/cyan]")
+    output_dir = output_dir or Path("reports/clusters")
     
     # Load fingerprints
-    fingerprinter = create_text_fingerprinter()
-    clusterer = create_ea_clusterer()
-    
-    # Find all fingerprint files
-    fingerprint_files = list(settings.fingerprints_dir.glob("*.minhash"))
-    
-    if not fingerprint_files:
-        rprint(f"[red]Error: No fingerprint files found in {settings.fingerprints_dir}[/red]")
-        rprint(f"[yellow]Run 'ea-agent ingest run' first to process PDFs[/yellow]")
-        raise typer.Exit(1)
-    
-    rprint(f"Loading {len(fingerprint_files)} document fingerprints...")
-    
+    fp_dir = clauses_dir.parent / "fp"
     fingerprints = []
-    with Progress() as progress:
-        task = progress.add_task("Loading fingerprints...", total=len(fingerprint_files))
-        
-        for fp_file in fingerprint_files:
-            try:
-                with open(fp_file, 'r') as f:
-                    fp_data = json.load(f)
-                fingerprint = fingerprinter.load_fingerprint(str(fp_file))
-                fingerprints.append(fingerprint)
-                progress.advance(task)
-            except Exception as e:
-                rprint(f"[red]Failed to load {fp_file}: {e}[/red]")
     
-    if not fingerprints:
-        rprint(f"[red]Error: No valid fingerprints loaded[/red]")
-        raise typer.Exit(1)
+    for fp_file in fp_dir.glob("*.fingerprint"):
+        try:
+            fingerprinter = Fingerprinter()
+            fingerprint = fingerprinter.load_fingerprint(fp_file)
+            fingerprints.append(fingerprint)
+        except Exception as e:
+            typer.echo(f"❌ Failed to load fingerprint {fp_file}: {e}")
     
-    rprint(f"Loaded {len(fingerprints)} fingerprints")
+    typer.echo(f"Loaded {len(fingerprints)} fingerprints")
     
     # Run clustering
-    if algorithm == "adaptive":
-        result = clusterer.adaptive_clustering(fingerprints)
-    elif algorithm == "minhash":
-        clusters = clusterer.cluster_by_minhash_threshold(fingerprints, threshold)
-        # Create result object (simplified for this example)
-        result = None  # Would need to create proper ClusteringResult
-    else:
-        rprint(f"[red]Error: Unknown algorithm: {algorithm}[/red]")
-        raise typer.Exit(1)
+    clustering_engine = ClusteringEngine({'algorithm': algorithm})
+    clusters = clustering_engine.cluster_documents(fingerprints, algorithm)
     
-    if result:
-        # Save results
-        output_dir.mkdir(parents=True, exist_ok=True)
-        clusterer.save_clustering_result(result, output_dir)
-        
-        # Display results
-        display_clustering_results(result)
-    else:
-        rprint(f"[red]Clustering failed[/red]")
-
-
-def display_clustering_results(result):
-    """Display clustering results."""
-    table = Table(title="Clustering Results")
+    # Generate candidates
+    candidates = clustering_engine.generate_cluster_candidates(clusters, fingerprints)
     
-    table.add_column("Metric", style="cyan")
-    table.add_column("Value", style="magenta")
+    # Save results
+    clustering_engine.save_clustering_results(clusters, output_dir)
     
-    table.add_row("Algorithm", result.algorithm.value)
-    table.add_row("Documents", str(result.num_documents))
-    table.add_row("Clusters", str(result.num_clusters))
-    table.add_row("Outliers", str(len(result.outliers)))
-    table.add_row("Execution Time", f"{result.execution_time_seconds:.2f}s")
+    # Display summary
+    high_conf = sum(1 for c in candidates if c.confidence_level == 'high')
+    medium_conf = sum(1 for c in candidates if c.confidence_level == 'medium')
+    low_conf = sum(1 for c in candidates if c.confidence_level == 'low')
     
-    console.print(table)
-    
-    # Show cluster details
-    if result.clusters:
-        cluster_table = Table(title="Cluster Details")
-        cluster_table.add_column("Cluster ID", style="cyan")
-        cluster_table.add_column("Size", style="magenta")
-        cluster_table.add_column("Confidence", style="green")
-        cluster_table.add_column("Centroid", style="blue")
-        
-        for cluster in result.clusters[:10]:  # Show first 10 clusters
-            cluster_table.add_row(
-                cluster.cluster_id[:8] + "...",
-                str(cluster.size),
-                f"{cluster.confidence_score:.3f}",
-                cluster.centroid_ea_id
-            )
-        
-        if len(result.clusters) > 10:
-            cluster_table.add_row("...", "...", "...", "...")
-        
-        console.print(cluster_table)
+    typer.echo(f"\n📊 Clustering Results:")
+    typer.echo(f"  Total clusters: {len(clusters)}")
+    typer.echo(f"  High confidence: {high_conf}")
+    typer.echo(f"  Medium confidence: {medium_conf}")
+    typer.echo(f"  Low confidence: {low_conf}")
 
-
-# ============================================================================
-# DATABASE COMMANDS
-# ============================================================================
-
-@db_app.command("init")
-def db_init(
-    drop_existing: bool = typer.Option(False, "--drop", help="Drop existing tables first"),
-    database_url: Optional[str] = typer.Option(None, "--url", help="Database URL override")
+@family_app.command()
+def build(
+    cluster_file: Path = typer.Argument(..., help="Clustering results file"),
+    clauses_dir: Path = typer.Argument(..., help="Directory containing clause files"),
+    output_dir: Optional[Path] = typer.Option(None, help="Output directory")
 ):
-    """Initialize the database with required tables."""
-    rprint(f"[bold blue]Initializing database...[/bold blue]")
+    """Build agreement families from clusters."""
+    setup_logging()
     
-    if drop_existing:
-        rprint(f"[yellow]Warning: This will drop all existing tables![/yellow]")
-        if not typer.confirm("Are you sure you want to continue?"):
-            rprint("Cancelled")
-            raise typer.Exit()
+    output_dir = output_dir or Path("data/families")
     
-    try:
-        init_database(database_url=database_url, drop_existing=drop_existing)
-        rprint(f"[green]Database initialized successfully[/green]")
-    except Exception as e:
-        rprint(f"[red]Database initialization failed: {e}[/red]")
-        raise typer.Exit(1)
-
-
-@db_app.command("status")
-def db_status():
-    """Check database connection and show status."""
-    db_manager = get_database_manager()
+    # Load clustering results
+    import json
+    with open(cluster_file, 'r') as f:
+        cluster_data = json.load(f)
     
-    rprint(f"[bold blue]Database Status[/bold blue]")
+    clusters = cluster_data['clusters']
     
-    # Test connection
-    if db_manager.test_connection():
-        rprint(f"[green]✓ Database connection successful[/green]")
+    # Load clauses
+    document_clauses = {}
+    for clause_file in clauses_dir.glob("*.jsonl"):
+        ea_id = clause_file.stem
+        clauses = []
         
-        # Get some basic stats
-        try:
-            with db_manager.session_scope() as session:
-                # Count records in key tables
-                from ..models import IngestRun, DocumentFingerprint as DBDocumentFingerprint
-                
-                ingest_runs = session.query(IngestRun).count()
-                fingerprints = session.query(DBDocumentFingerprint).count()
-                
-                table = Table()
-                table.add_column("Table", style="cyan")
-                table.add_column("Records", style="magenta")
-                
-                table.add_row("Ingest Runs", str(ingest_runs))
-                table.add_row("Document Fingerprints", str(fingerprints))
-                
-                console.print(table)
-                
-        except Exception as e:
-            rprint(f"[yellow]Could not retrieve database statistics: {e}[/yellow]")
+        with open(clause_file, 'r') as f:
+            for line in f:
+                clause_data = json.loads(line)
+                from ..models import ClauseSegment
+                clause = ClauseSegment(
+                    ea_id=clause_data['ea_id'],
+                    clause_id=clause_data['clause_id'],
+                    heading=clause_data['heading'],
+                    text=clause_data['text'],
+                    path=clause_data['path'],
+                    hash_sha256=clause_data['hash_sha256'],
+                    token_count=clause_data['token_count']
+                )
+                clauses.append(clause)
+        
+        document_clauses[ea_id] = clauses
     
-    else:
-        rprint(f"[red]✗ Database connection failed[/red]")
-        raise typer.Exit(1)
+    # Build families
+    family_builder = FamilyBuilder()
+    
+    # Convert clusters to candidates
+    from ..models import ClusterCandidate
+    candidates = []
+    for cluster_id, doc_ids in clusters.items():
+        candidate = ClusterCandidate(
+            cluster_id=cluster_id,
+            document_ids=doc_ids,
+            similarity_scores=[],
+            confidence_level="high" if len(doc_ids) > 1 else "singleton"
+        )
+        candidates.append(candidate)
+    
+    families = family_builder.build_families_from_clusters(candidates, document_clauses)
+    
+    # Save families
+    for family_id, family_data in families.items():
+        family_builder.save_family(family_data, output_dir)
+    
+    typer.echo(f"✅ Built {len(families)} families")
 
-
-# ============================================================================
-# UTILITY COMMANDS
-# ============================================================================
-
-@app.command("version")
-def version():
-    """Show version information."""
-    from .. import VERSION_INFO
+@qa_app.command()
+def smoketest(
+    family_id: str = typer.Argument(..., help="Family ID to test"),
+    scenarios: int = typer.Option(20, help="Number of test scenarios"),
+    output_dir: Optional[Path] = typer.Option(None, help="Output directory")
+):
+    """Run smoke tests on a family."""
+    setup_logging()
     
-    table = Table()
-    table.add_column("Property", style="cyan")
-    table.add_column("Value", style="magenta")
+    output_dir = output_dir or Path("reports/qa")
     
-    for key, value in VERSION_INFO.items():
-        table.add_row(key.title(), str(value))
+    # Generate synthetic workers
+    qa_calculator = QACalculator()
+    workers = qa_calculator.generate_synthetic_workers(family_id, scenarios)
     
-    console.print(table)
-
-
-@app.command("config")
-def show_config():
-    """Show current configuration."""
-    settings = get_settings()
-    
-    table = Table(title="EA Importer Configuration")
-    table.add_column("Setting", style="cyan")
-    table.add_column("Value", style="magenta")
-    
-    # Key settings to display
-    config_items = [
-        ("Data Root", str(settings.data_root)),
-        ("Database URL", settings.database_url[:50] + "..." if len(settings.database_url) > 50 else settings.database_url),
-        ("OCR Language", settings.ocr_language),
-        ("OCR DPI", str(settings.ocr_dpi)),
-        ("Min Clause Count", str(settings.min_clause_count)),
-        ("Jurisdiction", settings.jurisdiction),
-        ("Target Version", settings.target_version),
-        ("Debug Mode", str(settings.debug)),
+    # Mock family data for testing
+    family_rates = [
+        {'classification': 'Level 1', 'base_rate': 25.0, 'unit': 'hourly'},
+        {'classification': 'Level 2', 'base_rate': 28.0, 'unit': 'hourly'},
+        {'classification': 'Level 3', 'base_rate': 32.0, 'unit': 'hourly'}
     ]
     
-    for setting, value in config_items:
-        table.add_row(setting, value)
+    family_rules = [
+        {'rule_type': 'overtime', 'rule_data': {'multiplier': 1.5}},
+        {'rule_type': 'penalty_weekend', 'rule_data': {'multiplier': 1.5}},
+        {'rule_type': 'allowance', 'rule_data': {'amount': 25.0}}
+    ]
     
-    console.print(table)
+    # Run tests
+    results = qa_calculator.run_smoke_tests(family_id, family_rates, family_rules, workers)
+    
+    # Save results
+    output_file = output_dir / family_id / "smoketest_results.json"
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    qa_calculator.export_qa_results(results, str(output_file))
+    
+    # Display summary
+    passed = sum(1 for r in results if r.passed)
+    failed = len(results) - passed
+    total_anomalies = sum(len(r.anomalies) for r in results)
+    total_warnings = sum(len(r.warnings) for r in results)
+    
+    typer.echo(f"\n📊 QA Results for {family_id}:")
+    typer.echo(f"  Tests passed: {passed}/{len(results)}")
+    typer.echo(f"  Tests failed: {failed}")
+    typer.echo(f"  Total anomalies: {total_anomalies}")
+    typer.echo(f"  Total warnings: {total_warnings}")
 
-
-
-
-# ============================================================================
-# WEB INTERFACE COMMANDS
-# ============================================================================
-
-@web_app.command("start")
-def web_start(
-    host: str = typer.Option("127.0.0.1", "--host", help="Host to bind the web server to"),
-    port: int = typer.Option(8000, "--port", help="Port to bind the web server to"),
-    reload: bool = typer.Option(False, "--reload", help="Enable auto-reload for development"),
-    debug: bool = typer.Option(False, "--debug", help="Enable debug mode")
+@version_app.command()
+def create(
+    version_name: str = typer.Argument(..., help="Version name"),
+    families_dir: Path = typer.Argument(..., help="Families directory"),
+    instances_dir: Optional[Path] = typer.Option(None, help="Instances directory"),
+    notes: Optional[str] = typer.Option(None, help="Version notes")
 ):
-    """
-    Start the web interface for human-in-the-loop review and approval.
+    """Create a new corpus version."""
+    setup_logging()
     
-    This provides a web-based interface for:
-    - Reviewing clustering results
-    - Managing EA families 
-    - Approving family formations
-    - Version control and corpus locking
-    """
-    import uvicorn
-    from ..web import app as web_app
+    # Load families data
+    families_data = {}
+    for family_dir in families_dir.iterdir():
+        if family_dir.is_dir() and (family_dir / "family.json").exists():
+            with open(family_dir / "family.json", 'r') as f:
+                import json
+                family_data = json.load(f)
+                families_data[family_dir.name] = family_data
     
-    rprint(f"[bold blue]Starting EA Importer Web Interface[/bold blue]")
-    rprint(f"Server: [cyan]http://{host}:{port}[/cyan]")
+    # Load instances data
+    instances_data = {}
+    if instances_dir and instances_dir.exists():
+        for instance_dir in instances_dir.iterdir():
+            if instance_dir.is_dir() and (instance_dir / "instance.json").exists():
+                with open(instance_dir / "instance.json", 'r') as f:
+                    import json
+                    instance_data = json.load(f)
+                    instances_data[instance_dir.name] = instance_data
     
-    if debug:
-        rprint(f"[yellow]Debug mode enabled[/yellow]")
+    # Create version
+    version_controller = VersionController()
+    manifest = version_controller.create_version(version_name, families_data, instances_data, notes)
     
-    if reload:
-        rprint(f"[yellow]Auto-reload enabled for development[/yellow]")
+    # Save version
+    versions_dir = Path("versions")
+    version_controller.save_version(manifest, families_data, instances_data, versions_dir)
     
-    try:
-        uvicorn.run(
-            "ea_importer.web:app",
-            host=host,
-            port=port,
-            reload=reload,
-            log_level="debug" if debug else "info"
-        )
-    except KeyboardInterrupt:
-        rprint(f"\n[yellow]Web server stopped[/yellow]")
-    except Exception as e:
-        rprint(f"[red]Failed to start web server: {e}[/red]")
-        raise typer.Exit(1)
+    typer.echo(f"✅ Created version {version_name} with {manifest.families_count} families and {manifest.instances_count} instances")
 
+@version_app.command()
+def list_versions():
+    """List all available versions."""
+    setup_logging()
+    
+    version_controller = VersionController()
+    versions = version_controller.list_versions(Path("versions"))
+    
+    if not versions:
+        typer.echo("No versions found")
+        return
+    
+    typer.echo("📋 Available Versions:")
+    for version in versions:
+        locked_status = "🔒" if version.get('locked', False) else "🔓"
+        typer.echo(f"  {locked_status} {version['version']} - {version['created_at']} ({version.get('families_count', 0)} families, {version.get('instances_count', 0)} instances)")
 
-@web_app.command("status")
-def web_status():
-    """
-    Check the status of web interface components.
-    """
-    import requests
-    from ..core.config import get_settings
-    
-    settings = get_settings()
-    url = f"http://{settings.web_host}:{settings.web_port}/health"
-    
-    rprint(f"[bold blue]Web Interface Status[/bold blue]")
-    rprint(f"Expected URL: [cyan]{url}[/cyan]")
-    
-    try:
-        response = requests.get(url, timeout=5)
-        if response.status_code == 200:
-            data = response.json()
-            rprint(f"[green]✓ Web interface is running[/green]")
-            
-            table = Table()
-            table.add_column("Component", style="cyan")
-            table.add_column("Status", style="magenta")
-            
-            table.add_row("Overall", data.get('status', 'unknown'))
-            table.add_row("Database", data.get('database', 'unknown'))
-            table.add_row("Data Directories", data.get('data_directories', 'unknown'))
-            table.add_row("Version", data.get('version', 'unknown'))
-            
-            console.print(table)
-        else:
-            rprint(f"[red]✗ Web interface returned status code {response.status_code}[/red]")
-    
-    except requests.exceptions.ConnectionError:
-        rprint(f"[red]✗ Web interface is not running or not accessible[/red]")
-        rprint(f"[yellow]Start it with: ea-agent web start[/yellow]")
-    except Exception as e:
-        rprint(f"[red]✗ Error checking web interface: {e}[/red]")
-
+def main():
+    """Main CLI entry point."""
+    app()
 
 if __name__ == "__main__":
-    app()
+    main()

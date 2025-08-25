@@ -1,147 +1,331 @@
 """
-Database connection and session management.
+Database module for EA Importer system.
+Handles PostgreSQL connections, sessions, and database operations.
 """
 
-from typing import Generator, Optional
 from contextlib import contextmanager
-from functools import lru_cache
+from typing import Generator, Optional, Type, TypeVar, Union
+import logging
 
-from sqlalchemy import create_engine, MetaData
+from sqlalchemy import create_engine, MetaData, inspect
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.pool import StaticPool
 
 from ..core.config import get_settings
-from ..core.logging import get_logger
 from ..models import Base
 
-logger = get_logger(__name__)
+# Type variables for generic database operations
+ModelType = TypeVar("ModelType", bound=Base)
+
+logger = logging.getLogger(__name__)
 
 
 class DatabaseManager:
-    """Manages database connections and sessions."""
+    """
+    Database connection and session management.
+    """
     
     def __init__(self, database_url: Optional[str] = None):
+        """
+        Initialize database manager.
+        
+        Args:
+            database_url: Optional database URL override
+        """
         self.settings = get_settings()
-        self.database_url = database_url or self.settings.database_url
+        self.database_url = database_url or self.settings.database.url
+        self.engine: Optional[Engine] = None
+        self.SessionLocal: Optional[sessionmaker] = None
         
-        # Create engine
-        engine_kwargs = {
-            "echo": self.settings.debug,
-            "future": True,
-        }
+    def initialize(self) -> None:
+        """Initialize database engine and session factory."""
+        logger.info(f"Initializing database connection to {self._safe_url()}")
         
-        # For SQLite (testing), use special pool
-        if self.database_url.startswith("sqlite"):
-            engine_kwargs.update({
-                "poolclass": StaticPool,
-                "connect_args": {"check_same_thread": False},
-            })
-        
-        self.engine = create_engine(self.database_url, **engine_kwargs)
+        # Create engine with connection pooling
+        self.engine = create_engine(
+            self.database_url,
+            echo=self.settings.database.echo,
+            pool_size=self.settings.database.pool_size,
+            max_overflow=self.settings.database.max_overflow,
+            pool_pre_ping=True,  # Verify connections before use
+        )
         
         # Create session factory
         self.SessionLocal = sessionmaker(
-            bind=self.engine,
             autocommit=False,
             autoflush=False,
-            future=True
+            bind=self.engine
         )
         
-        logger.info(f"Database manager initialized with URL: {self._mask_url(self.database_url)}")
+        logger.info("Database connection initialized successfully")
     
-    def _mask_url(self, url: str) -> str:
-        """Mask sensitive parts of database URL for logging."""
-        if "://" in url:
-            scheme, rest = url.split("://", 1)
-            if "@" in rest:
-                creds, host_part = rest.split("@", 1)
-                return f"{scheme}://***:***@{host_part}"
-        return url
+    def _safe_url(self) -> str:
+        """Return database URL with password masked for logging."""
+        if "://" not in self.database_url:
+            return self.database_url
+            
+        protocol, rest = self.database_url.split("://", 1)
+        
+        if "@" in rest:
+            auth, host_path = rest.split("@", 1)
+            if ":" in auth:
+                user, _ = auth.split(":", 1)
+                return f"{protocol}://{user}:***@{host_path}"
+        
+        return self.database_url
     
-    def create_tables(self):
-        """Create all tables in the database."""
-        logger.info("Creating database tables...")
+    def create_tables(self) -> None:
+        """Create all database tables."""
+        if not self.engine:
+            raise RuntimeError("Database not initialized. Call initialize() first.")
+            
+        logger.info("Creating database tables")
         Base.metadata.create_all(bind=self.engine)
         logger.info("Database tables created successfully")
     
-    def drop_tables(self):
-        """Drop all tables in the database (use with caution!)."""
-        logger.warning("Dropping all database tables...")
+    def drop_tables(self) -> None:
+        """Drop all database tables. Use with caution!"""
+        if not self.engine:
+            raise RuntimeError("Database not initialized. Call initialize() first.")
+            
+        logger.warning("Dropping all database tables")
         Base.metadata.drop_all(bind=self.engine)
-        logger.warning("All database tables dropped")
+        logger.info("Database tables dropped")
     
-    def get_session(self) -> Session:
-        """Get a new database session."""
-        return self.SessionLocal()
+    def table_exists(self, table_name: str) -> bool:
+        """Check if a table exists in the database."""
+        if not self.engine:
+            return False
+            
+        inspector = inspect(self.engine)
+        return table_name in inspector.get_table_names()
+    
+    def get_table_info(self) -> dict:
+        """Get information about existing tables."""
+        if not self.engine:
+            return {}
+            
+        inspector = inspect(self.engine)
+        table_info = {}
+        
+        for table_name in inspector.get_table_names():
+            columns = inspector.get_columns(table_name)
+            table_info[table_name] = {
+                'columns': [col['name'] for col in columns],
+                'column_count': len(columns)
+            }
+        
+        return table_info
     
     @contextmanager
-    def session_scope(self) -> Generator[Session, None, None]:
-        """Provide a transactional scope around a series of operations."""
-        session = self.get_session()
+    def get_session(self) -> Generator[Session, None, None]:
+        """
+        Context manager for database sessions.
+        
+        Yields:
+            Database session with automatic cleanup
+        """
+        if not self.SessionLocal:
+            raise RuntimeError("Database not initialized. Call initialize() first.")
+            
+        session = self.SessionLocal()
         try:
             yield session
             session.commit()
-        except Exception:
+        except Exception as e:
             session.rollback()
+            logger.error(f"Database session error: {e}")
             raise
         finally:
             session.close()
     
+    def get_raw_session(self) -> Session:
+        """
+        Get a raw session without context management.
+        Caller is responsible for session lifecycle.
+        """
+        if not self.SessionLocal:
+            raise RuntimeError("Database not initialized. Call initialize() first.")
+            
+        return self.SessionLocal()
+    
     def test_connection(self) -> bool:
-        """Test database connection."""
+        """
+        Test database connection.
+        
+        Returns:
+            True if connection is successful
+        """
         try:
-            with self.engine.connect() as conn:
-                conn.execute("SELECT 1")
-            logger.info("Database connection test successful")
-            return True
+            with self.get_session() as session:
+                session.execute("SELECT 1")
+                return True
         except Exception as e:
             logger.error(f"Database connection test failed: {e}")
             return False
 
 
-@lru_cache()
-def get_database_manager() -> DatabaseManager:
-    """Get cached database manager instance."""
-    return DatabaseManager()
+# Global database manager instance
+db_manager = DatabaseManager()
 
 
+def get_database() -> DatabaseManager:
+    """Get the global database manager instance."""
+    return db_manager
+
+
+def init_database(database_url: Optional[str] = None) -> DatabaseManager:
+    """
+    Initialize the database with optional URL override.
+    
+    Args:
+        database_url: Optional database URL override
+        
+    Returns:
+        Initialized database manager
+    """
+    if database_url:
+        db_manager.database_url = database_url
+    
+    db_manager.initialize()
+    return db_manager
+
+
+@contextmanager
 def get_db_session() -> Generator[Session, None, None]:
     """
-    Dependency for FastAPI to get database sessions.
+    Convenience function for getting database sessions.
     
     Yields:
         Database session
     """
-    db_manager = get_database_manager()
-    session = db_manager.get_session()
-    try:
+    with db_manager.get_session() as session:
         yield session
-    finally:
-        session.close()
 
 
-# Utility functions for common database operations
-
-def init_database(database_url: Optional[str] = None, drop_existing: bool = False):
+# Repository pattern base class
+class BaseRepository:
     """
-    Initialize the database with tables.
+    Base repository class for database operations.
+    """
+    
+    def __init__(self, session: Session, model_class: Type[ModelType]):
+        self.session = session
+        self.model_class = model_class
+    
+    def create(self, **kwargs) -> ModelType:
+        """Create a new record."""
+        instance = self.model_class(**kwargs)
+        self.session.add(instance)
+        self.session.flush()  # Get ID without committing
+        return instance
+    
+    def get_by_id(self, record_id: int) -> Optional[ModelType]:
+        """Get record by ID."""
+        return self.session.query(self.model_class).filter(
+            self.model_class.id == record_id
+        ).first()
+    
+    def get_all(self, limit: Optional[int] = None) -> list[ModelType]:
+        """Get all records with optional limit."""
+        query = self.session.query(self.model_class)
+        if limit:
+            query = query.limit(limit)
+        return query.all()
+    
+    def update(self, record_id: int, **kwargs) -> Optional[ModelType]:
+        """Update record by ID."""
+        instance = self.get_by_id(record_id)
+        if instance:
+            for key, value in kwargs.items():
+                setattr(instance, key, value)
+            self.session.flush()
+        return instance
+    
+    def delete(self, record_id: int) -> bool:
+        """Delete record by ID."""
+        instance = self.get_by_id(record_id)
+        if instance:
+            self.session.delete(instance)
+            self.session.flush()
+            return True
+        return False
+    
+    def count(self) -> int:
+        """Count total records."""
+        return self.session.query(self.model_class).count()
+    
+    def exists(self, **kwargs) -> bool:
+        """Check if record exists with given criteria."""
+        query = self.session.query(self.model_class)
+        for key, value in kwargs.items():
+            query = query.filter(getattr(self.model_class, key) == value)
+        return query.first() is not None
+
+
+# Database operation utilities
+def create_test_database(test_db_url: str = "sqlite:///:memory:") -> DatabaseManager:
+    """
+    Create an in-memory test database.
     
     Args:
-        database_url: Optional database URL override
-        drop_existing: Whether to drop existing tables first
+        test_db_url: Test database URL (defaults to in-memory SQLite)
+        
+    Returns:
+        Test database manager
     """
-    db_manager = DatabaseManager(database_url) if database_url else get_database_manager()
-    
-    if drop_existing:
-        db_manager.drop_tables()
-    
+    test_db = DatabaseManager(test_db_url)
+    test_db.initialize()
+    test_db.create_tables()
+    return test_db
+
+
+def reset_database() -> None:
+    """
+    Reset the database by dropping and recreating all tables.
+    USE WITH CAUTION - THIS WILL DELETE ALL DATA!
+    """
+    logger.warning("Resetting database - all data will be lost!")
+    db_manager.drop_tables()
     db_manager.create_tables()
+    logger.info("Database reset completed")
+
+
+def setup_database() -> None:
+    """
+    Set up the database for first-time use.
+    """
+    logger.info("Setting up database for first-time use")
+    
+    # Initialize connection
+    db_manager.initialize()
+    
+    # Check if tables exist
+    table_info = db_manager.get_table_info()
+    
+    if not table_info:
+        logger.info("No existing tables found, creating new database schema")
+        db_manager.create_tables()
+    else:
+        logger.info(f"Found existing tables: {list(table_info.keys())}")
     
     # Test connection
-    if not db_manager.test_connection():
-        raise RuntimeError("Failed to connect to database after initialization")
+    if db_manager.test_connection():
+        logger.info("Database setup completed successfully")
+    else:
+        raise RuntimeError("Database connection test failed")
 
 
-def get_metadata() -> MetaData:
-    """Get SQLAlchemy metadata for migrations."""
-    return Base.metadata
+# Export main components
+__all__ = [
+    "DatabaseManager",
+    "BaseRepository", 
+    "db_manager",
+    "get_database",
+    "init_database",
+    "get_db_session",
+    "create_test_database",
+    "reset_database",
+    "setup_database",
+]

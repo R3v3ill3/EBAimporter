@@ -1,434 +1,614 @@
 """
-Fingerprinting utilities for document similarity using SHA256 and MinHash.
+Document Fingerprinting utility for EA Importer.
+
+Handles multiple fingerprinting strategies for document similarity detection:
+- SHA256 hashing for exact content matching
+- MinHash signatures for approximate similarity
+- Optional text embeddings for semantic similarity
+- Shingle-based text preprocessing
+- Efficient batch processing
+
+Designed for large-scale document corpus analysis.
 """
 
 import hashlib
 import pickle
-from typing import List, Set, Union, Dict, Tuple, Optional
-from dataclasses import dataclass
+import logging
+from typing import List, Dict, Any, Optional, Tuple, Set, Union
+from pathlib import Path
+import time
+from datetime import datetime
 
-import numpy as np
-from datasketch import MinHashLSH, MinHash
+try:
+    import numpy as np
+    HAS_NUMPY = True
+except ImportError:
+    HAS_NUMPY = False
 
-from ..core.logging import LoggerMixin
+try:
+    from datasketch import MinHashLSH, MinHash
+    HAS_DATASKETCH = True
+except ImportError:
+    HAS_DATASKETCH = False
+
+try:
+    import mmh3
+    HAS_MURMURHASH = True
+except ImportError:
+    HAS_MURMURHASH = False
+
+# Optional: For embeddings
+try:
+    import spacy
+    HAS_SPACY = True
+except ImportError:
+    HAS_SPACY = False
+
+from ..core.config import get_settings
+from ..core.logging import get_logger, log_function_call
+from ..models import PDFDocument, ClauseSegment, DocumentFingerprint
+
+logger = get_logger(__name__)
 
 
-@dataclass
-class DocumentFingerprint:
-    """Represents fingerprints for a document."""
-    ea_id: str
-    sha256_hash: str
-    minhash_signature: MinHash
-    text_length: int
-    num_clauses: int
+class FingerprintingError(Exception):
+    """Custom exception for fingerprinting errors"""
+    pass
+
+
+class TextPreprocessor:
+    """
+    Text preprocessing for fingerprinting.
+    """
     
-    def to_dict(self) -> Dict:
-        """Convert to dictionary for storage."""
-        return {
-            'ea_id': self.ea_id,
-            'sha256_hash': self.sha256_hash,
-            'minhash_bytes': pickle.dumps(self.minhash_signature),
-            'text_length': self.text_length,
-            'num_clauses': self.num_clauses,
-        }
-    
-    @classmethod
-    def from_dict(cls, data: Dict) -> 'DocumentFingerprint':
-        """Create from dictionary."""
-        return cls(
-            ea_id=data['ea_id'],
-            sha256_hash=data['sha256_hash'],
-            minhash_signature=pickle.loads(data['minhash_bytes']),
-            text_length=data['text_length'],
-            num_clauses=data['num_clauses'],
-        )
-
-
-class TextFingerprinter(LoggerMixin):
-    """Generates fingerprints for text documents using various hashing methods."""
-    
-    def __init__(self, 
-                 ngram_size: int = 5,
-                 num_perm: int = 128,
-                 similarity_threshold: float = 0.8):
+    def __init__(self, ngram_size: int = 5, shingle_size: int = 3):
         """
-        Initialize the fingerprinter.
+        Initialize text preprocessor.
         
         Args:
-            ngram_size: Size of character n-grams for MinHash
-            num_perm: Number of permutation functions for MinHash
-            similarity_threshold: Threshold for LSH similarity
+            ngram_size: Size of character n-grams
+            shingle_size: Size of word shingles
         """
         self.ngram_size = ngram_size
-        self.num_perm = num_perm
-        self.similarity_threshold = similarity_threshold
-        
-        # Initialize LSH for fast similarity queries
-        self.lsh = MinHashLSH(threshold=similarity_threshold, num_perm=num_perm)
-        
-        self.logger.info(f"Fingerprinter initialized with {ngram_size}-grams, "
-                        f"{num_perm} permutations, threshold {similarity_threshold}")
+        self.shingle_size = shingle_size
     
-    def compute_sha256(self, text: str) -> str:
+    def create_shingles(self, text: str, shingle_type: str = "word") -> Set[str]:
         """
-        Compute SHA256 hash of text.
+        Create shingles from text.
+        
+        Args:
+            text: Input text
+            shingle_type: Type of shingles ("word", "char", "mixed")
+            
+        Returns:
+            Set of shingles
+        """
+        text = text.lower().strip()
+        
+        if shingle_type == "word":
+            return self._create_word_shingles(text)
+        elif shingle_type == "char":
+            return self._create_char_shingles(text)
+        elif shingle_type == "mixed":
+            word_shingles = self._create_word_shingles(text)
+            char_shingles = self._create_char_shingles(text)
+            return word_shingles.union(char_shingles)
+        else:
+            raise ValueError(f"Unknown shingle type: {shingle_type}")
+    
+    def _create_word_shingles(self, text: str) -> Set[str]:
+        """Create word-based shingles"""
+        words = text.split()
+        shingles = set()
+        
+        for i in range(len(words) - self.shingle_size + 1):
+            shingle = " ".join(words[i:i + self.shingle_size])
+            shingles.add(shingle)
+        
+        return shingles
+    
+    def _create_char_shingles(self, text: str) -> Set[str]:
+        """Create character-based n-grams"""
+        # Remove spaces for character n-grams
+        text_no_spaces = text.replace(" ", "")
+        shingles = set()
+        
+        for i in range(len(text_no_spaces) - self.ngram_size + 1):
+            shingle = text_no_spaces[i:i + self.ngram_size]
+            shingles.add(shingle)
+        
+        return shingles
+    
+    def preprocess_for_hashing(self, text: str) -> str:
+        """
+        Preprocess text for consistent hashing.
         
         Args:
             text: Input text
             
         Returns:
-            SHA256 hash as hex string
+            Normalized text for hashing
         """
-        # Normalize text for consistent hashing
-        normalized_text = text.strip().lower()
-        return hashlib.sha256(normalized_text.encode('utf-8')).hexdigest()
+        # Normalize whitespace and case
+        text = " ".join(text.lower().split())
+        
+        # Remove punctuation for better similarity detection
+        import string
+        text = text.translate(str.maketrans('', '', string.punctuation))
+        
+        return text
+
+
+class Fingerprinter:
+    """
+    Advanced document fingerprinting with multiple similarity detection methods.
+    """
     
-    def extract_ngrams(self, text: str, n: int = None) -> Set[str]:
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
         """
-        Extract character n-grams from text.
+        Initialize fingerprinter.
         
         Args:
-            text: Input text
-            n: N-gram size (defaults to self.ngram_size)
-            
-        Returns:
-            Set of n-grams
+            config: Optional configuration override
         """
-        n = n or self.ngram_size
+        self.settings = get_settings()
+        self.config = config or {}
         
-        # Normalize text
-        normalized_text = text.lower().replace('\n', ' ').replace('\t', ' ')
-        # Remove extra whitespace
-        normalized_text = ' '.join(normalized_text.split())
+        # Fingerprinting parameters
+        self.minhash_permutations = self.config.get('minhash_permutations', self.settings.fingerprint.minhash_permutations)
+        self.ngram_size = self.config.get('ngram_size', self.settings.fingerprint.ngram_size)
+        self.shingle_size = self.config.get('shingle_size', self.settings.fingerprint.shingle_size)
         
-        # Extract n-grams
-        ngrams = set()
-        for i in range(len(normalized_text) - n + 1):
-            ngram = normalized_text[i:i + n]
-            ngrams.add(ngram)
+        # Initialize preprocessor
+        self.preprocessor = TextPreprocessor(
+            ngram_size=self.ngram_size,
+            shingle_size=self.shingle_size
+        )
         
-        return ngrams
+        # Initialize embedding model if available
+        self.embedding_model = None
+        if HAS_SPACY:
+            try:
+                self.embedding_model = spacy.load("en_core_web_sm")
+                logger.info("Loaded spaCy model for embeddings")
+            except OSError:
+                logger.warning("spaCy model not found, embeddings disabled")
+        
+        # Check dependencies
+        self._check_dependencies()
     
-    def compute_minhash(self, text: str) -> MinHash:
+    def _check_dependencies(self):
+        """Check and log available dependencies"""
+        available = []
+        missing = []
+        
+        if HAS_DATASKETCH:
+            available.append("datasketch (MinHash)")
+        else:
+            missing.append("datasketch")
+        
+        if HAS_NUMPY:
+            available.append("numpy")
+        else:
+            missing.append("numpy")
+        
+        if HAS_MURMURHASH:
+            available.append("mmh3 (MurmurHash)")
+        else:
+            missing.append("mmh3")
+        
+        if HAS_SPACY and self.embedding_model:
+            available.append("spacy (embeddings)")
+        else:
+            missing.append("spacy/embeddings")
+        
+        logger.info(f"Fingerprinting dependencies - Available: {available}")
+        if missing:
+            logger.warning(f"Missing optional dependencies: {missing}")
+    
+    @log_function_call
+    def fingerprint_document(self, document: PDFDocument, include_embeddings: bool = False) -> DocumentFingerprint:
         """
-        Compute MinHash signature for text.
+        Create comprehensive fingerprint for a document.
         
         Args:
-            text: Input text
-            
-        Returns:
-            MinHash signature
-        """
-        # Extract n-grams
-        ngrams = self.extract_ngrams(text)
-        
-        # Create MinHash
-        minhash = MinHash(num_perm=self.num_perm)
-        
-        # Add n-grams to MinHash
-        for ngram in ngrams:
-            minhash.update(ngram.encode('utf-8'))
-        
-        return minhash
-    
-    def compute_jaccard_similarity(self, minhash1: MinHash, minhash2: MinHash) -> float:
-        """
-        Compute Jaccard similarity between two MinHash signatures.
-        
-        Args:
-            minhash1: First MinHash signature
-            minhash2: Second MinHash signature
-            
-        Returns:
-            Jaccard similarity (0.0 to 1.0)
-        """
-        return minhash1.jaccard(minhash2)
-    
-    def fingerprint_document(self,
-                           ea_id: str,
-                           full_text: str,
-                           num_clauses: int = None) -> DocumentFingerprint:
-        """
-        Generate complete fingerprint for a document.
-        
-        Args:
-            ea_id: Document identifier
-            full_text: Complete document text
-            num_clauses: Number of clauses in document
+            document: PDFDocument to fingerprint
+            include_embeddings: Whether to generate embeddings
             
         Returns:
             DocumentFingerprint object
         """
-        self.logger.debug(f"Fingerprinting document {ea_id}")
+        ea_id = document.metadata.get('ea_id', 'UNKNOWN')
+        logger.info(f"Fingerprinting document {ea_id}")
         
-        # Compute SHA256 hash
-        sha256_hash = self.compute_sha256(full_text)
+        # Get full text
+        full_text = document.full_text
         
-        # Compute MinHash signature
-        minhash_signature = self.compute_minhash(full_text)
+        if not full_text.strip():
+            raise FingerprintingError(f"Document {ea_id} has no text content")
         
+        # Create MinHash signature
+        minhash_signature = self._create_minhash(full_text)
+        
+        # Create embeddings if requested
+        embedding_vector = None
+        if include_embeddings and self.embedding_model:
+            embedding_vector = self._create_embedding(full_text)
+        
+        # Create fingerprint object
         fingerprint = DocumentFingerprint(
             ea_id=ea_id,
-            sha256_hash=sha256_hash,
-            minhash_signature=minhash_signature,
-            text_length=len(full_text),
-            num_clauses=num_clauses or 0
+            minhash_signature=pickle.dumps(minhash_signature),
+            embedding_vector=pickle.dumps(embedding_vector) if embedding_vector is not None else None,
+            minhash_permutations=self.minhash_permutations,
+            ngram_size=self.ngram_size,
+            created_at=datetime.now()
         )
         
-        self.logger.debug(f"Generated fingerprint for {ea_id}: "
-                         f"SHA256={sha256_hash[:16]}..., text_length={len(full_text)}")
-        
+        logger.debug(f"Fingerprint created for {ea_id}")
         return fingerprint
     
-    def fingerprint_clauses(self, clauses: List[Dict]) -> List[Tuple[str, str]]:
+    def _create_minhash(self, text: str) -> MinHash:
         """
-        Generate SHA256 hashes for individual clauses.
+        Create MinHash signature from text.
         
         Args:
-            clauses: List of clause dictionaries with 'clause_id' and 'text' keys
+            text: Input text
             
         Returns:
-            List of (clause_id, sha256_hash) tuples
+            MinHash object
         """
-        fingerprints = []
+        if not HAS_DATASKETCH:
+            raise FingerprintingError("datasketch library required for MinHash")
         
-        for clause in clauses:
-            clause_id = clause['clause_id']
-            text = clause['text']
-            
-            sha256_hash = self.compute_sha256(text)
-            fingerprints.append((clause_id, sha256_hash))
+        # Create shingles
+        shingles = self.preprocessor.create_shingles(text, "mixed")
         
-        return fingerprints
+        if not shingles:
+            logger.warning("No shingles created from text")
+            shingles = {text}  # Fallback to whole text
+        
+        # Create MinHash
+        minhash = MinHash(num_perm=self.minhash_permutations)
+        
+        for shingle in shingles:
+            minhash.update(shingle.encode('utf8'))
+        
+        return minhash
     
-    def add_to_lsh(self, fingerprint: DocumentFingerprint):
+    def _create_embedding(self, text: str) -> Optional[np.ndarray]:
         """
-        Add document fingerprint to LSH index for fast similarity queries.
+        Create text embedding using spaCy.
         
         Args:
-            fingerprint: Document fingerprint to add
-        """
-        try:
-            self.lsh.insert(fingerprint.ea_id, fingerprint.minhash_signature)
-            self.logger.debug(f"Added {fingerprint.ea_id} to LSH index")
-        except ValueError as e:
-            # Document might already be in LSH
-            self.logger.warning(f"Could not add {fingerprint.ea_id} to LSH: {e}")
-    
-    def query_similar_documents(self, 
-                              fingerprint: DocumentFingerprint,
-                              exclude_self: bool = True) -> List[str]:
-        """
-        Query LSH for similar documents.
-        
-        Args:
-            fingerprint: Query document fingerprint
-            exclude_self: Whether to exclude the query document from results
+            text: Input text
             
         Returns:
-            List of similar document IDs
+            Embedding vector or None if not available
         """
+        if not self.embedding_model or not HAS_NUMPY:
+            return None
+        
         try:
-            similar_docs = self.lsh.query(fingerprint.minhash_signature)
+            # Truncate text if too long (spaCy has limits)
+            max_chars = 1000000  # 1M characters
+            if len(text) > max_chars:
+                text = text[:max_chars]
+                logger.warning("Text truncated for embedding generation")
             
-            if exclude_self and fingerprint.ea_id in similar_docs:
-                similar_docs.remove(fingerprint.ea_id)
-            
-            self.logger.debug(f"Found {len(similar_docs)} similar documents to {fingerprint.ea_id}")
-            return similar_docs
+            doc = self.embedding_model(text)
+            return doc.vector
             
         except Exception as e:
-            self.logger.error(f"LSH query failed for {fingerprint.ea_id}: {e}")
-            return []
+            logger.warning(f"Failed to create embedding: {e}")
+            return None
     
-    def compute_similarity_matrix(self, 
-                                fingerprints: List[DocumentFingerprint]) -> np.ndarray:
+    def calculate_similarity(self, fp1: DocumentFingerprint, fp2: DocumentFingerprint, method: str = "minhash") -> float:
         """
-        Compute pairwise similarity matrix for a list of documents.
+        Calculate similarity between two document fingerprints.
+        
+        Args:
+            fp1: First document fingerprint
+            fp2: Second document fingerprint
+            method: Similarity method ("minhash", "embedding", "combined")
+            
+        Returns:
+            Similarity score (0.0 to 1.0)
+        """
+        if method == "minhash":
+            return self._calculate_minhash_similarity(fp1, fp2)
+        elif method == "embedding":
+            return self._calculate_embedding_similarity(fp1, fp2)
+        elif method == "combined":
+            minhash_sim = self._calculate_minhash_similarity(fp1, fp2)
+            embedding_sim = self._calculate_embedding_similarity(fp1, fp2)
+            
+            # Weighted combination (favor MinHash if embeddings not available)
+            if embedding_sim is not None:
+                return 0.7 * minhash_sim + 0.3 * embedding_sim
+            else:
+                return minhash_sim
+        else:
+            raise ValueError(f"Unknown similarity method: {method}")
+    
+    def _calculate_minhash_similarity(self, fp1: DocumentFingerprint, fp2: DocumentFingerprint) -> float:
+        """Calculate MinHash Jaccard similarity"""
+        try:
+            minhash1 = pickle.loads(fp1.minhash_signature)
+            minhash2 = pickle.loads(fp2.minhash_signature)
+            
+            return minhash1.jaccard(minhash2)
+            
+        except Exception as e:
+            logger.error(f"Failed to calculate MinHash similarity: {e}")
+            return 0.0
+    
+    def _calculate_embedding_similarity(self, fp1: DocumentFingerprint, fp2: DocumentFingerprint) -> Optional[float]:
+        """Calculate embedding cosine similarity"""
+        if not fp1.embedding_vector or not fp2.embedding_vector or not HAS_NUMPY:
+            return None
+        
+        try:
+            emb1 = pickle.loads(fp1.embedding_vector)
+            emb2 = pickle.loads(fp2.embedding_vector)
+            
+            # Calculate cosine similarity
+            dot_product = np.dot(emb1, emb2)
+            norm1 = np.linalg.norm(emb1)
+            norm2 = np.linalg.norm(emb2)
+            
+            if norm1 == 0 or norm2 == 0:
+                return 0.0
+            
+            return float(dot_product / (norm1 * norm2))
+            
+        except Exception as e:
+            logger.error(f"Failed to calculate embedding similarity: {e}")
+            return None
+    
+    def calculate_sha256(self, text: str) -> str:
+        """
+        Calculate SHA256 hash of text.
+        
+        Args:
+            text: Input text
+            
+        Returns:
+            SHA256 hash as hexadecimal string
+        """
+        normalized_text = self.preprocessor.preprocess_for_hashing(text)
+        return hashlib.sha256(normalized_text.encode('utf-8')).hexdigest()
+    
+    def fingerprint_clauses(self, clauses: List[ClauseSegment], include_embeddings: bool = False) -> Dict[str, DocumentFingerprint]:
+        """
+        Create fingerprints for individual clauses.
+        
+        Args:
+            clauses: List of clause segments
+            include_embeddings: Whether to generate embeddings
+            
+        Returns:
+            Dictionary mapping clause IDs to fingerprints
+        """
+        logger.info(f"Fingerprinting {len(clauses)} clauses")
+        
+        fingerprints = {}
+        
+        for clause in clauses:
+            try:
+                # Create MinHash for clause
+                minhash_signature = self._create_minhash(clause.text)
+                
+                # Create embeddings if requested
+                embedding_vector = None
+                if include_embeddings and self.embedding_model:
+                    embedding_vector = self._create_embedding(clause.text)
+                
+                # Create fingerprint
+                fingerprint = DocumentFingerprint(
+                    ea_id=f"{clause.ea_id}#{clause.clause_id}",
+                    minhash_signature=pickle.dumps(minhash_signature),
+                    embedding_vector=pickle.dumps(embedding_vector) if embedding_vector is not None else None,
+                    minhash_permutations=self.minhash_permutations,
+                    ngram_size=self.ngram_size,
+                    created_at=datetime.now()
+                )
+                
+                fingerprints[clause.clause_id] = fingerprint
+                
+            except Exception as e:
+                logger.error(f"Failed to fingerprint clause {clause.clause_id}: {e}")
+        
+        logger.info(f"Successfully fingerprinted {len(fingerprints)} clauses")
+        return fingerprints
+    
+    def build_similarity_matrix(self, fingerprints: List[DocumentFingerprint], method: str = "minhash") -> Tuple[np.ndarray, List[str]]:
+        """
+        Build similarity matrix for a set of fingerprints.
         
         Args:
             fingerprints: List of document fingerprints
+            method: Similarity calculation method
             
         Returns:
-            Symmetric similarity matrix
+            Tuple of (similarity_matrix, document_ids)
         """
+        if not HAS_NUMPY:
+            raise FingerprintingError("numpy required for similarity matrix")
+        
+        logger.info(f"Building similarity matrix for {len(fingerprints)} documents")
+        
+        document_ids = [fp.ea_id for fp in fingerprints]
         n = len(fingerprints)
         similarity_matrix = np.zeros((n, n))
         
-        self.logger.info(f"Computing similarity matrix for {n} documents")
-        
+        # Calculate pairwise similarities
         for i in range(n):
             for j in range(i, n):
                 if i == j:
                     similarity_matrix[i, j] = 1.0
                 else:
-                    similarity = self.compute_jaccard_similarity(
-                        fingerprints[i].minhash_signature,
-                        fingerprints[j].minhash_signature
-                    )
-                    similarity_matrix[i, j] = similarity
-                    similarity_matrix[j, i] = similarity
+                    sim = self.calculate_similarity(fingerprints[i], fingerprints[j], method)
+                    similarity_matrix[i, j] = sim
+                    similarity_matrix[j, i] = sim  # Symmetric matrix
         
-        return similarity_matrix
+        logger.info("Similarity matrix completed")
+        return similarity_matrix, document_ids
     
-    def find_duplicate_documents(self, 
-                               fingerprints: List[DocumentFingerprint],
-                               threshold: float = 0.95) -> List[List[str]]:
+    def find_near_duplicates(self, fingerprints: List[DocumentFingerprint], threshold: float = 0.95) -> List[Tuple[str, str, float]]:
         """
-        Find groups of duplicate/near-duplicate documents.
+        Find near-duplicate documents based on similarity threshold.
         
         Args:
             fingerprints: List of document fingerprints
-            threshold: Similarity threshold for considering documents as duplicates
+            threshold: Similarity threshold for near-duplicates
             
         Returns:
-            List of duplicate groups (each group is a list of document IDs)
+            List of (doc_id1, doc_id2, similarity) tuples
         """
-        duplicate_groups = []
-        processed_docs = set()
+        logger.info(f"Finding near-duplicates with threshold {threshold}")
         
-        similarity_matrix = self.compute_similarity_matrix(fingerprints)
+        near_duplicates = []
         
-        for i, fingerprint in enumerate(fingerprints):
-            if fingerprint.ea_id in processed_docs:
-                continue
-            
-            # Find all documents similar to this one
-            duplicate_group = [fingerprint.ea_id]
-            processed_docs.add(fingerprint.ea_id)
-            
-            for j, other_fingerprint in enumerate(fingerprints):
-                if (i != j and 
-                    other_fingerprint.ea_id not in processed_docs and
-                    similarity_matrix[i, j] >= threshold):
-                    
-                    duplicate_group.append(other_fingerprint.ea_id)
-                    processed_docs.add(other_fingerprint.ea_id)
-            
-            # Only add groups with more than one document
-            if len(duplicate_group) > 1:
-                duplicate_groups.append(duplicate_group)
+        for i, fp1 in enumerate(fingerprints):
+            for j, fp2 in enumerate(fingerprints[i+1:], i+1):
+                similarity = self.calculate_similarity(fp1, fp2)
+                
+                if similarity >= threshold:
+                    near_duplicates.append((fp1.ea_id, fp2.ea_id, similarity))
         
-        self.logger.info(f"Found {len(duplicate_groups)} duplicate groups")
-        return duplicate_groups
+        logger.info(f"Found {len(near_duplicates)} near-duplicate pairs")
+        return near_duplicates
     
-    def save_fingerprint(self, fingerprint: DocumentFingerprint, file_path: str):
+    def save_fingerprint(self, fingerprint: DocumentFingerprint, output_dir: Path) -> Path:
         """
-        Save fingerprint to file.
+        Save fingerprint to disk.
         
         Args:
-            fingerprint: Fingerprint to save
-            file_path: Output file path
+            fingerprint: Document fingerprint to save
+            output_dir: Output directory
+            
+        Returns:
+            Path to saved file
         """
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create safe filename
+        safe_ea_id = fingerprint.ea_id.replace('/', '_').replace('\\', '_')
+        output_path = output_dir / f"{safe_ea_id}.fingerprint"
+        
+        with open(output_path, 'wb') as f:
+            pickle.dump(fingerprint, f)
+        
+        return output_path
+    
+    def load_fingerprint(self, file_path: Path) -> DocumentFingerprint:
+        """
+        Load fingerprint from disk.
+        
+        Args:
+            file_path: Path to fingerprint file
+            
+        Returns:
+            DocumentFingerprint object
+        """
+        with open(file_path, 'rb') as f:
+            return pickle.load(f)
+
+
+class LSHIndex:
+    """
+    Locality-Sensitive Hashing index for fast similarity search.
+    """
+    
+    def __init__(self, threshold: float = 0.8, num_perm: int = 128):
+        """
+        Initialize LSH index.
+        
+        Args:
+            threshold: Similarity threshold for LSH
+            num_perm: Number of permutations for MinHash
+        """
+        if not HAS_DATASKETCH:
+            raise FingerprintingError("datasketch library required for LSH")
+        
+        self.threshold = threshold
+        self.num_perm = num_perm
+        self.lsh = MinHashLSH(threshold=threshold, num_perm=num_perm)
+        self.fingerprints = {}  # Store fingerprints by ID
+    
+    def add_fingerprint(self, fingerprint: DocumentFingerprint):
+        """Add fingerprint to LSH index"""
+        minhash = pickle.loads(fingerprint.minhash_signature)
+        self.lsh.insert(fingerprint.ea_id, minhash)
+        self.fingerprints[fingerprint.ea_id] = fingerprint
+    
+    def query_similar(self, fingerprint: DocumentFingerprint) -> List[str]:
+        """Find similar documents using LSH"""
+        minhash = pickle.loads(fingerprint.minhash_signature)
+        return list(self.lsh.query(minhash))
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get index statistics"""
+        return {
+            'threshold': self.threshold,
+            'num_perm': self.num_perm,
+            'total_documents': len(self.fingerprints),
+            'index_size': len(self.lsh.keys) if hasattr(self.lsh, 'keys') else 'unknown'
+        }
+
+
+# Utility functions for batch processing
+def fingerprint_documents_batch(documents: List[PDFDocument], **kwargs) -> Dict[str, DocumentFingerprint]:
+    """
+    Fingerprint multiple documents in batch.
+    
+    Args:
+        documents: List of PDFDocuments to fingerprint
+        **kwargs: Arguments passed to Fingerprinter
+        
+    Returns:
+        Dictionary mapping EA IDs to fingerprints
+    """
+    fingerprinter = Fingerprinter(**kwargs)
+    results = {}
+    
+    for document in documents:
+        ea_id = document.metadata.get('ea_id', 'UNKNOWN')
         try:
-            with open(file_path, 'wb') as f:
-                pickle.dump(fingerprint.to_dict(), f)
-            self.logger.debug(f"Saved fingerprint for {fingerprint.ea_id} to {file_path}")
+            fingerprint = fingerprinter.fingerprint_document(document)
+            results[ea_id] = fingerprint
         except Exception as e:
-            self.logger.error(f"Failed to save fingerprint: {e}")
-            raise
+            logger.error(f"Failed to fingerprint document {ea_id}: {e}")
     
-    def load_fingerprint(self, file_path: str) -> DocumentFingerprint:
-        """
-        Load fingerprint from file.
-        
-        Args:
-            file_path: Input file path
-            
-        Returns:
-            Loaded fingerprint
-        """
+    return results
+
+
+def save_fingerprints_batch(fingerprints: Dict[str, DocumentFingerprint], output_dir: Path):
+    """
+    Save multiple fingerprints to disk in batch.
+    
+    Args:
+        fingerprints: Dictionary of fingerprints to save
+        output_dir: Output directory
+    """
+    fingerprinter = Fingerprinter()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    for ea_id, fingerprint in fingerprints.items():
         try:
-            with open(file_path, 'rb') as f:
-                data = pickle.load(f)
-            return DocumentFingerprint.from_dict(data)
+            fingerprinter.save_fingerprint(fingerprint, output_dir)
+            logger.debug(f"Saved fingerprint for {ea_id}")
         except Exception as e:
-            self.logger.error(f"Failed to load fingerprint from {file_path}: {e}")
-            raise
+            logger.error(f"Failed to save fingerprint for {ea_id}: {e}")
 
 
-class ClauseFingerprinter(LoggerMixin):
-    """Specialized fingerprinting for individual clauses within documents."""
-    
-    def __init__(self, ngram_size: int = 3):
-        """
-        Initialize clause fingerprinter.
-        
-        Args:
-            ngram_size: Size of n-grams for clause fingerprinting
-        """
-        self.ngram_size = ngram_size
-        self.text_fingerprinter = TextFingerprinter(ngram_size=ngram_size)
-    
-    def fingerprint_clause(self, clause_text: str) -> Tuple[str, MinHash]:
-        """
-        Generate fingerprint for a single clause.
-        
-        Args:
-            clause_text: Text content of the clause
-            
-        Returns:
-            Tuple of (SHA256 hash, MinHash signature)
-        """
-        sha256_hash = self.text_fingerprinter.compute_sha256(clause_text)
-        minhash_signature = self.text_fingerprinter.compute_minhash(clause_text)
-        
-        return sha256_hash, minhash_signature
-    
-    def compare_clauses(self, clause1_text: str, clause2_text: str) -> float:
-        """
-        Compare similarity between two clauses.
-        
-        Args:
-            clause1_text: First clause text
-            clause2_text: Second clause text
-            
-        Returns:
-            Jaccard similarity score
-        """
-        _, minhash1 = self.fingerprint_clause(clause1_text)
-        _, minhash2 = self.fingerprint_clause(clause2_text)
-        
-        return self.text_fingerprinter.compute_jaccard_similarity(minhash1, minhash2)
-    
-    def find_similar_clauses(self,
-                           target_clause: str,
-                           candidate_clauses: List[Tuple[str, str]],
-                           threshold: float = 0.8) -> List[Tuple[str, float]]:
-        """
-        Find clauses similar to a target clause.
-        
-        Args:
-            target_clause: Target clause text
-            candidate_clauses: List of (clause_id, clause_text) tuples
-            threshold: Similarity threshold
-            
-        Returns:
-            List of (clause_id, similarity_score) tuples for similar clauses
-        """
-        _, target_minhash = self.fingerprint_clause(target_clause)
-        similar_clauses = []
-        
-        for clause_id, clause_text in candidate_clauses:
-            _, candidate_minhash = self.fingerprint_clause(clause_text)
-            similarity = self.text_fingerprinter.compute_jaccard_similarity(
-                target_minhash, candidate_minhash
-            )
-            
-            if similarity >= threshold:
-                similar_clauses.append((clause_id, similarity))
-        
-        # Sort by similarity (descending)
-        similar_clauses.sort(key=lambda x: x[1], reverse=True)
-        
-        return similar_clauses
-
-
-def create_text_fingerprinter(**kwargs) -> TextFingerprinter:
-    """Factory function to create a text fingerprinter."""
-    return TextFingerprinter(**kwargs)
-
-
-def create_clause_fingerprinter(**kwargs) -> ClauseFingerprinter:
-    """Factory function to create a clause fingerprinter."""
-    return ClauseFingerprinter(**kwargs)
+# Export main classes
+__all__ = [
+    'Fingerprinter',
+    'LSHIndex',
+    'TextPreprocessor',
+    'FingerprintingError',
+    'fingerprint_documents_batch',
+    'save_fingerprints_batch',
+]

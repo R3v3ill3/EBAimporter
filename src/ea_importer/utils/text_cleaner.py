@@ -1,369 +1,513 @@
 """
-Text cleaning and normalization utilities for EA documents.
+Text Cleaning and Normalization utility for EA Importer.
+
+Handles comprehensive text cleaning for extracted PDF content:
+- Header/footer removal
+- Hyphenation repair
+- Whitespace normalization
+- Quote mark standardization
+- Page break preservation
+- Special character handling
+- Legal document formatting preservation
+
+Designed specifically for Australian Enterprise Agreement documents.
 """
 
 import re
+import logging
 import unicodedata
-from typing import List, Dict, Tuple, Optional
-from dataclasses import dataclass
+from typing import List, Dict, Any, Optional, Tuple, Set
+from pathlib import Path
 
-from ..core.logging import LoggerMixin
+from ..core.logging import get_logger, log_function_call
+from ..models import PDFDocument, PDFPage
 
-
-@dataclass
-class CleaningStats:
-    """Statistics from text cleaning operations."""
-    original_length: int
-    cleaned_length: int
-    lines_removed: int = 0
-    hyphenations_fixed: int = 0
-    whitespace_normalized: int = 0
-    headers_footers_removed: int = 0
-    
-    @property
-    def reduction_ratio(self) -> float:
-        """Calculate text reduction ratio."""
-        if self.original_length == 0:
-            return 0.0
-        return (self.original_length - self.cleaned_length) / self.original_length
+logger = get_logger(__name__)
 
 
-class TextCleaner(LoggerMixin):
-    """Handles text cleaning and normalization for EA documents."""
+class TextCleaningError(Exception):
+    """Custom exception for text cleaning errors"""
+    pass
+
+
+class TextCleaner:
+    """
+    Advanced text cleaning and normalization for legal documents.
+    """
     
-    # Common header/footer patterns in EA documents
-    HEADER_FOOTER_PATTERNS = [
-        r'^Page \d+ of \d+$',
-        r'^\d+$',  # Just page numbers
-        r'^Fair Work Commission.*$',
-        r'^FWC.*$',
-        r'^www\.fwc\.gov\.au.*$',
-        r'^Published \d{1,2} \w+ \d{4}$',
-        r'^MA\d{6}.*$',  # FWC matter numbers
-        r'^.*Enterprise Agreement.*$',
-        r'^DRAFT.*$',
-        r'^CONFIDENTIAL.*$',
-        r'^FOR APPROVAL.*$',
-    ]
-    
-    # Patterns for hyphenation repair
-    HYPHENATION_PATTERNS = [
-        (r'(\w+)-\s*\n\s*(\w+)', r'\1\2'),  # word- \n word -> wordword
-        (r'(\w+)-\s+(\w+)', r'\1\2'),       # word- word -> wordword (same line)
-    ]
-    
-    # Quote marks to normalize
-    QUOTE_NORMALIZATION = {
-        '"': '"',  # Left double quotation mark
-        '"': '"',  # Right double quotation mark
-        ''': "'",  # Left single quotation mark
-        ''': "'",  # Right single quotation mark
-        '`': "'",  # Grave accent
-        '´': "'",  # Acute accent
-    }
-    
-    def __init__(self):
-        """Initialize the text cleaner."""
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        """
+        Initialize text cleaner.
+        
+        Args:
+            config: Optional configuration override
+        """
+        self.config = config or {}
+        
+        # Compile regex patterns for efficiency
         self._compile_patterns()
+        
+        # Common headers/footers in EA documents
+        self.common_headers = self._load_common_headers()
+        self.common_footers = self._load_common_footers()
     
     def _compile_patterns(self):
-        """Compile regex patterns for efficiency."""
-        self.header_footer_regex = [
-            re.compile(pattern, re.IGNORECASE | re.MULTILINE)
-            for pattern in self.HEADER_FOOTER_PATTERNS
-        ]
+        """Compile commonly used regex patterns"""
         
-        self.hyphenation_regex = [
-            (re.compile(pattern), replacement)
-            for pattern, replacement in self.HYPHENATION_PATTERNS
-        ]
+        # Hyphenation patterns
+        self.hyphen_patterns = {
+            # End-of-line hyphenation (word split across lines)
+            'line_break': re.compile(r'(\w+)-\s*\n\s*(\w+)', re.MULTILINE),
+            
+            # Common hyphenated words that shouldn't be joined
+            'keep_hyphen': re.compile(r'\b(part-time|full-time|co-worker|ex-employee|multi-\w+|non-\w+|pre-\w+|post-\w+|self-\w+|anti-\w+)\b', re.IGNORECASE)
+        }
+        
+        # Whitespace patterns
+        self.whitespace_patterns = {
+            # Multiple spaces
+            'multiple_spaces': re.compile(r' {2,}'),
+            
+            # Multiple newlines (preserve up to 2)
+            'multiple_newlines': re.compile(r'\n{3,}'),
+            
+            # Tab characters
+            'tabs': re.compile(r'\t'),
+            
+            # Trailing whitespace
+            'trailing': re.compile(r'[ \t]+$', re.MULTILINE),
+            
+            # Leading whitespace (preserve some for indentation)
+            'excessive_leading': re.compile(r'^\s{5,}', re.MULTILINE)
+        }
+        
+        # Quote patterns
+        self.quote_patterns = {
+            # Smart quotes to regular quotes
+            'smart_single': re.compile(r'[\u2018\u2019]'),  # ' '
+            'smart_double': re.compile(r'[\u201c\u201d]'),  # " "
+            
+            # Other quote-like characters
+            'backtick': re.compile(r'`'),
+            'prime': re.compile(r'[\u2032\u2033]')  # ′ ″
+        }
+        
+        # Page number patterns
+        self.page_patterns = {
+            'page_number': re.compile(r'^\s*(?:page\s+)?\d+\s*(?:of\s+\d+)?\s*$', re.IGNORECASE | re.MULTILINE),
+            'page_footer': re.compile(r'^\s*-?\s*\d+\s*-?\s*$', re.MULTILINE)
+        }
+        
+        # Header/footer patterns
+        self.header_footer_patterns = {
+            'document_title': re.compile(r'^.{0,5}(ENTERPRISE AGREEMENT|CERTIFIED AGREEMENT|AWARD).{0,50}$', re.IGNORECASE | re.MULTILINE),
+            'date_line': re.compile(r'^\s*(?:Date|Updated|Version|Effective).*\d{4}\s*$', re.IGNORECASE | re.MULTILINE),
+            'copyright': re.compile(r'©|\(c\)|copyright|proprietary|confidential', re.IGNORECASE),
+            'url_line': re.compile(r'^\s*(?:https?://|www\.)\S+\s*$', re.MULTILINE),
+            'email_line': re.compile(r'^\s*\S+@\S+\.\S+\s*$', re.MULTILINE)
+        }
+        
+        # Legal reference patterns
+        self.legal_patterns = {
+            'section_ref': re.compile(r'\b(?:section|clause|part|schedule|appendix)\s+\d+(?:\.\d+)*\b', re.IGNORECASE),
+            'act_reference': re.compile(r'\b\w+\s+Act\s+\d{4}\b'),
+            'regulation_ref': re.compile(r'\b\w+\s+Regulation\s+\d{4}\b')
+        }
+        
+        # Special character patterns
+        self.special_char_patterns = {
+            'bullet_points': re.compile(r'^[\s]*[•·▪▫◦‣⁃]\s*', re.MULTILINE),
+            'em_dash': re.compile(r'—'),
+            'en_dash': re.compile(r'–'),
+            'ellipsis': re.compile(r'…'),
+            'non_breaking_space': re.compile(r'\u00a0')  # Non-breaking space
+        }
     
-    def normalize_unicode(self, text: str) -> str:
+    def _load_common_headers(self) -> Set[str]:
+        """Load common header patterns found in EA documents"""
+        return {
+            'fair work commission',
+            'fair work australia', 
+            'australian industrial relations commission',
+            'enterprise agreement',
+            'certified agreement',
+            'workplace agreement',
+            'page',
+            'document'
+        }
+    
+    def _load_common_footers(self) -> Set[str]:
+        """Load common footer patterns found in EA documents"""
+        return {
+            'page',
+            'confidential',
+            'proprietary',
+            'copyright',
+            '©',
+            'draft',
+            'version'
+        }
+    
+    @log_function_call
+    def clean_document(self, document: PDFDocument) -> PDFDocument:
         """
-        Normalize Unicode characters to standard forms.
+        Clean all pages in a PDF document.
         
         Args:
-            text: Input text
+            document: PDFDocument to clean
             
         Returns:
-            Normalized text
+            PDFDocument with cleaned text
         """
-        # Normalize to NFC form (canonical decomposition followed by canonical composition)
-        normalized = unicodedata.normalize('NFC', text)
+        logger.info(f"Cleaning document with {len(document.pages)} pages")
         
-        # Replace non-standard quotes
-        for old_char, new_char in self.QUOTE_NORMALIZATION.items():
-            normalized = normalized.replace(old_char, new_char)
+        cleaned_pages = []
         
-        return normalized
-    
-    def fix_hyphenation(self, text: str) -> Tuple[str, int]:
-        """
-        Fix broken hyphenation from PDF extraction.
-        
-        Args:
-            text: Input text
-            
-        Returns:
-            Tuple of (fixed text, number of fixes made)
-        """
-        fixes = 0
-        result = text
-        
-        for pattern, replacement in self.hyphenation_regex:
-            new_result, count = pattern.subn(replacement, result)
-            result = new_result
-            fixes += count
-        
-        return result, fixes
-    
-    def remove_headers_footers(self, lines: List[str]) -> Tuple[List[str], int]:
-        """
-        Remove headers and footers from text lines.
-        
-        Args:
-            lines: List of text lines
-            
-        Returns:
-            Tuple of (cleaned lines, number of lines removed)
-        """
-        cleaned_lines = []
-        removed_count = 0
-        
-        for line in lines:
-            line_stripped = line.strip()
-            
-            # Skip empty lines
-            if not line_stripped:
-                cleaned_lines.append(line)
-                continue
-            
-            # Check against header/footer patterns
-            is_header_footer = False
-            for pattern in self.header_footer_regex:
-                if pattern.match(line_stripped):
-                    is_header_footer = True
-                    break
-            
-            # Additional heuristics for headers/footers
-            if not is_header_footer:
-                # Very short lines that are just numbers or single words
-                if len(line_stripped) <= 3 and (line_stripped.isdigit() or 
-                                               len(line_stripped.split()) == 1):
-                    is_header_footer = True
+        for page_num, page in enumerate(document.pages):
+            try:
+                cleaned_page = self.clean_page(page, document_context={
+                    'total_pages': len(document.pages),
+                    'page_number': page_num + 1,
+                    'file_path': document.file_path
+                })
+                cleaned_pages.append(cleaned_page)
                 
-                # Lines that are mostly uppercase and short
-                elif (len(line_stripped) < 50 and 
-                      len([c for c in line_stripped if c.isupper()]) > len(line_stripped) * 0.7):
-                    is_header_footer = True
-            
-            if is_header_footer:
-                removed_count += 1
-                self.logger.debug(f"Removed header/footer: '{line_stripped}'")
-            else:
-                cleaned_lines.append(line)
+            except Exception as e:
+                logger.warning(f"Failed to clean page {page_num + 1}: {e}")
+                # Keep original page if cleaning fails
+                cleaned_pages.append(page)
         
-        return cleaned_lines, removed_count
-    
-    def normalize_whitespace(self, text: str) -> Tuple[str, int]:
-        """
-        Normalize whitespace in text.
-        
-        Args:
-            text: Input text
-            
-        Returns:
-            Tuple of (normalized text, number of normalizations)
-        """
-        original_lines = len(text.split('\n'))
-        
-        # Replace multiple spaces with single spaces
-        text = re.sub(r' +', ' ', text)
-        
-        # Replace multiple newlines with at most two newlines
-        text = re.sub(r'\n\s*\n\s*\n+', '\n\n', text)
-        
-        # Remove trailing whitespace from lines
-        lines = text.split('\n')
-        lines = [line.rstrip() for line in lines]
-        text = '\n'.join(lines)
-        
-        # Remove leading/trailing whitespace
-        text = text.strip()
-        
-        new_lines = len(text.split('\n'))
-        normalizations = max(0, original_lines - new_lines)
-        
-        return text, normalizations
-    
-    def preserve_page_breaks(self, text: str, page_marker: str = "\n\n[PAGE_BREAK]\n\n") -> str:
-        """
-        Insert page break markers to preserve page boundaries.
-        
-        Args:
-            text: Input text
-            page_marker: Marker to insert at page breaks
-            
-        Returns:
-            Text with page break markers
-        """
-        # This is a simple heuristic - in practice, you'd pass page boundaries
-        # from the PDF processor
-        
-        # Look for patterns that suggest page breaks
-        page_break_patterns = [
-            r'\n\s*Page \d+\s*\n',
-            r'\n\s*\d+\s*\n\s*\n',  # Page numbers
-            r'\n\s*[A-Z\s]{10,}\s*\n',  # All caps headers
-        ]
-        
-        result = text
-        for pattern in page_break_patterns:
-            result = re.sub(pattern, page_marker, result, flags=re.IGNORECASE)
-        
-        return result
-    
-    def clean_text(
-        self,
-        text: str,
-        remove_headers_footers: bool = True,
-        fix_hyphenation: bool = True,
-        normalize_unicode: bool = True,
-        normalize_whitespace: bool = True,
-        preserve_page_breaks: bool = True
-    ) -> Tuple[str, CleaningStats]:
-        """
-        Perform comprehensive text cleaning.
-        
-        Args:
-            text: Input text
-            remove_headers_footers: Whether to remove headers/footers
-            fix_hyphenation: Whether to fix hyphenation
-            normalize_unicode: Whether to normalize Unicode
-            normalize_whitespace: Whether to normalize whitespace
-            preserve_page_breaks: Whether to preserve page break markers
-            
-        Returns:
-            Tuple of (cleaned text, cleaning statistics)
-        """
-        original_length = len(text)
-        result = text
-        
-        stats = CleaningStats(original_length=original_length, cleaned_length=0)
-        
-        # Unicode normalization
-        if normalize_unicode:
-            result = self.normalize_unicode(result)
-        
-        # Fix hyphenation
-        if fix_hyphenation:
-            result, stats.hyphenations_fixed = self.fix_hyphenation(result)
-        
-        # Remove headers and footers
-        if remove_headers_footers:
-            lines = result.split('\n')
-            cleaned_lines, stats.headers_footers_removed = self.remove_headers_footers(lines)
-            result = '\n'.join(cleaned_lines)
-            stats.lines_removed = stats.headers_footers_removed
-        
-        # Preserve page breaks before normalizing whitespace
-        if preserve_page_breaks:
-            result = self.preserve_page_breaks(result)
-        
-        # Normalize whitespace
-        if normalize_whitespace:
-            result, stats.whitespace_normalized = self.normalize_whitespace(result)
-        
-        stats.cleaned_length = len(result)
-        
-        self.logger.debug(f"Text cleaning completed: {original_length} -> {stats.cleaned_length} chars "
-                         f"({stats.reduction_ratio:.1%} reduction)")
-        
-        return result, stats
-    
-    def clean_clause_text(self, text: str) -> str:
-        """
-        Clean text specifically for clause content.
-        
-        Args:
-            text: Clause text
-            
-        Returns:
-            Cleaned clause text
-        """
-        # More conservative cleaning for clause text
-        result, _ = self.clean_text(
-            text,
-            remove_headers_footers=False,  # Don't remove headers in clause context
-            fix_hyphenation=True,
-            normalize_unicode=True,
-            normalize_whitespace=True,
-            preserve_page_breaks=False  # Don't preserve page breaks in clauses
+        # Create new document with cleaned pages
+        cleaned_document = PDFDocument(
+            file_path=document.file_path,
+            pages=cleaned_pages,
+            metadata={
+                **document.metadata,
+                'text_cleaned': True,
+                'cleaning_stats': self._calculate_cleaning_stats(document.pages, cleaned_pages)
+            }
         )
         
-        # Additional clause-specific cleaning
-        # Remove excessive blank lines within clauses
-        result = re.sub(r'\n\s*\n\s*\n+', '\n\n', result)
-        
-        # Ensure clause ends with proper punctuation or newline
-        result = result.strip()
-        if result and not result[-1] in '.!?':
-            # Don't add punctuation if it ends with a colon (might be introducing a list)
-            if not result.endswith(':'):
-                result += '.'
-        
-        return result
+        logger.info("Document cleaning completed")
+        return cleaned_document
     
-    def extract_potential_headings(self, text: str) -> List[Dict[str, any]]:
+    def clean_page(self, page: PDFPage, document_context: Optional[Dict[str, Any]] = None) -> PDFPage:
         """
-        Extract potential section headings from text.
+        Clean text on a single page.
         
         Args:
-            text: Input text
+            page: PDFPage to clean
+            document_context: Optional context about the document
             
         Returns:
-            List of potential headings with metadata
+            PDFPage with cleaned text
         """
-        headings = []
+        if not page.text.strip():
+            return page  # Nothing to clean
+        
+        original_text = page.text
+        text = original_text
+        
+        # Step 1: Normalize Unicode characters
+        text = self._normalize_unicode(text)
+        
+        # Step 2: Remove headers and footers
+        text = self._remove_headers_footers(text, document_context)
+        
+        # Step 3: Fix hyphenation
+        text = self._fix_hyphenation(text)
+        
+        # Step 4: Normalize quotes
+        text = self._normalize_quotes(text)
+        
+        # Step 5: Clean whitespace
+        text = self._normalize_whitespace(text)
+        
+        # Step 6: Handle special characters
+        text = self._normalize_special_characters(text)
+        
+        # Step 7: Preserve legal structure
+        text = self._preserve_legal_structure(text)
+        
+        # Step 8: Final cleanup
+        text = self._final_cleanup(text)
+        
+        # Create cleaned page
+        cleaned_page = PDFPage(
+            page_number=page.page_number,
+            text=text,
+            bbox=page.bbox,
+            has_images=page.has_images,
+            tables=page.tables  # Keep table data unchanged
+        )
+        
+        return cleaned_page
+    
+    def _normalize_unicode(self, text: str) -> str:
+        """Normalize Unicode characters to standard forms"""
+        # Normalize to NFKC form (canonical decomposition, then canonical composition)
+        text = unicodedata.normalize('NFKC', text)
+        
+        # Remove or replace problematic Unicode characters
+        replacements = {
+            '\ufeff': '',  # Byte order mark
+            '\u200b': '',  # Zero width space
+            '\u200c': '',  # Zero width non-joiner
+            '\u200d': '',  # Zero width joiner
+            '\u2060': '',  # Word joiner
+        }
+        
+        for old, new in replacements.items():
+            text = text.replace(old, new)
+        
+        return text
+    
+    def _remove_headers_footers(self, text: str, context: Optional[Dict[str, Any]] = None) -> str:
+        """Remove common headers and footers"""
         lines = text.split('\n')
+        cleaned_lines = []
         
-        heading_patterns = [
-            # Numbered sections: "1. Introduction", "2.1 Definitions"
-            r'^(\d+(?:\.\d+)*\.?)\s+(.+)$',
-            # Letter sections: "A. General", "B.1 Specific"
-            r'^([A-Z](?:\.\d+)*\.?)\s+(.+)$',
-            # Parenthetical: "(a) First item", "(i) Sub item"
-            r'^\(([a-z]+|[ivx]+)\)\s+(.+)$',
-            # All caps short lines (potential headings)
-            r'^([A-Z\s]{3,30})$',
-        ]
-        
-        for line_num, line in enumerate(lines):
-            line_stripped = line.strip()
-            if not line_stripped or len(line_stripped) < 3:
+        for i, line in enumerate(lines):
+            line_clean = line.strip().lower()
+            
+            # Skip empty lines
+            if not line_clean:
+                cleaned_lines.append(line)
                 continue
             
-            for pattern in heading_patterns:
-                match = re.match(pattern, line_stripped)
-                if match:
-                    if len(match.groups()) == 2:
-                        number, title = match.groups()
-                    else:
-                        number = ""
-                        title = match.group(1)
-                    
-                    headings.append({
-                        'line_number': line_num,
-                        'number': number.strip(),
-                        'title': title.strip(),
-                        'full_text': line_stripped,
-                        'pattern': pattern
-                    })
-                    break
+            # Check for page numbers
+            if self.page_patterns['page_number'].match(line) or self.page_patterns['page_footer'].match(line):
+                continue
+            
+            # Check for common headers (first few lines)
+            if i < 3 and any(header in line_clean for header in self.common_headers):
+                continue
+            
+            # Check for common footers (last few lines)
+            if i >= len(lines) - 3 and any(footer in line_clean for footer in self.common_footers):
+                continue
+            
+            # Check for document metadata lines
+            if (self.header_footer_patterns['date_line'].match(line) or
+                self.header_footer_patterns['url_line'].match(line) or
+                self.header_footer_patterns['email_line'].match(line)):
+                continue
+            
+            # Keep the line
+            cleaned_lines.append(line)
         
-        return headings
+        return '\n'.join(cleaned_lines)
+    
+    def _fix_hyphenation(self, text: str) -> str:
+        """Fix hyphenation issues from PDF extraction"""
+        
+        # First, protect legitimate hyphenated words
+        protected_words = []
+        for match in self.hyphen_patterns['keep_hyphen'].finditer(text):
+            protected_words.append(match.group())
+        
+        # Fix line-break hyphenation
+        def fix_line_hyphen(match):
+            word1, word2 = match.groups()
+            combined = word1 + word2
+            
+            # Don't combine if it would create a protected word incorrectly
+            if any(protected in combined.lower() for protected in ['part-time', 'full-time']):
+                return match.group(0)  # Keep original
+            
+            return combined
+        
+        text = self.hyphen_patterns['line_break'].sub(fix_line_hyphen, text)
+        
+        return text
+    
+    def _normalize_quotes(self, text: str) -> str:
+        """Normalize quote characters to standard ASCII"""
+        
+        # Convert smart quotes
+        text = self.quote_patterns['smart_single'].sub("'", text)
+        text = self.quote_patterns['smart_double'].sub('"', text)
+        
+        # Convert other quote-like characters
+        text = self.quote_patterns['backtick'].sub("'", text)
+        text = self.quote_patterns['prime'].sub("'", text)
+        
+        return text
+    
+    def _normalize_whitespace(self, text: str) -> str:
+        """Normalize whitespace while preserving document structure"""
+        
+        # Convert tabs to spaces
+        text = self.whitespace_patterns['tabs'].sub('    ', text)
+        
+        # Remove trailing whitespace
+        text = self.whitespace_patterns['trailing'].sub('', text)
+        
+        # Normalize multiple spaces (but preserve some indentation)
+        text = self.whitespace_patterns['multiple_spaces'].sub(' ', text)
+        
+        # Limit excessive leading whitespace (preserve some for structure)
+        text = self.whitespace_patterns['excessive_leading'].sub('    ', text)
+        
+        # Limit multiple newlines (preserve paragraph breaks)
+        text = self.whitespace_patterns['multiple_newlines'].sub('\n\n', text)
+        
+        return text
+    
+    def _normalize_special_characters(self, text: str) -> str:
+        """Normalize special characters"""
+        
+        # Replace non-breaking spaces with regular spaces
+        text = self.special_char_patterns['non_breaking_space'].sub(' ', text)
+        
+        # Normalize dashes
+        text = self.special_char_patterns['em_dash'].sub(' - ', text)
+        text = self.special_char_patterns['en_dash'].sub(' - ', text)
+        
+        # Replace ellipsis
+        text = self.special_char_patterns['ellipsis'].sub('...', text)
+        
+        # Standardize bullet points
+        text = self.special_char_patterns['bullet_points'].sub('• ', text)
+        
+        return text
+    
+    def _preserve_legal_structure(self, text: str) -> str:
+        """Preserve important legal document structure"""
+        
+        # Ensure proper spacing around section references
+        def fix_section_ref(match):
+            return ' ' + match.group().strip() + ' '
+        
+        text = self.legal_patterns['section_ref'].sub(fix_section_ref, text)
+        
+        # Preserve legal references
+        text = re.sub(r'\b(Fair Work Act 2009|Industrial Relations Act|Workplace Relations Act)\b', 
+                     lambda m: ' ' + m.group() + ' ', text)
+        
+        return text
+    
+    def _final_cleanup(self, text: str) -> str:
+        """Final cleanup and validation"""
+        
+        # Remove excessive whitespace
+        text = re.sub(r' {2,}', ' ', text)
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        
+        # Ensure text ends with newline
+        text = text.rstrip() + '\n'
+        
+        # Remove any remaining problematic characters
+        text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+        
+        return text
+    
+    def _calculate_cleaning_stats(self, original_pages: List[PDFPage], cleaned_pages: List[PDFPage]) -> Dict[str, Any]:
+        """Calculate statistics about the cleaning process"""
+        
+        original_text = '\n'.join(page.text for page in original_pages)
+        cleaned_text = '\n'.join(page.text for page in cleaned_pages)
+        
+        stats = {
+            'original_length': len(original_text),
+            'cleaned_length': len(cleaned_text),
+            'length_reduction': len(original_text) - len(cleaned_text),
+            'length_reduction_percent': ((len(original_text) - len(cleaned_text)) / len(original_text) * 100) if original_text else 0,
+            
+            'original_lines': original_text.count('\n'),
+            'cleaned_lines': cleaned_text.count('\n'),
+            
+            'original_words': len(original_text.split()),
+            'cleaned_words': len(cleaned_text.split()),
+        }
+        
+        return stats
+    
+    def clean_text(self, text: str, preserve_structure: bool = True) -> str:
+        """
+        Clean raw text without page context.
+        
+        Args:
+            text: Raw text to clean
+            preserve_structure: Whether to preserve document structure
+            
+        Returns:
+            Cleaned text
+        """
+        if not text.strip():
+            return text
+        
+        # Apply basic cleaning steps
+        text = self._normalize_unicode(text)
+        text = self._fix_hyphenation(text)
+        text = self._normalize_quotes(text)
+        text = self._normalize_whitespace(text)
+        text = self._normalize_special_characters(text)
+        
+        if preserve_structure:
+            text = self._preserve_legal_structure(text)
+        
+        text = self._final_cleanup(text)
+        
+        return text
+    
+    def extract_metadata(self, text: str) -> Dict[str, Any]:
+        """
+        Extract metadata from cleaned text.
+        
+        Args:
+            text: Cleaned text
+            
+        Returns:
+            Extracted metadata
+        """
+        metadata = {
+            'length': len(text),
+            'word_count': len(text.split()),
+            'line_count': text.count('\n'),
+            'paragraph_count': text.count('\n\n'),
+            'has_legal_references': bool(self.legal_patterns['section_ref'].search(text)),
+            'has_act_references': bool(self.legal_patterns['act_reference'].search(text)),
+        }
+        
+        return metadata
 
 
-def create_text_cleaner() -> TextCleaner:
-    """Factory function to create a text cleaner."""
-    return TextCleaner()
+# Utility functions for batch text cleaning
+def clean_text_batch(texts: List[str], **kwargs) -> List[str]:
+    """
+    Clean multiple text strings in batch.
+    
+    Args:
+        texts: List of text strings to clean
+        **kwargs: Arguments passed to TextCleaner
+        
+    Returns:
+        List of cleaned text strings
+    """
+    cleaner = TextCleaner(**kwargs)
+    return [cleaner.clean_text(text) for text in texts]
+
+
+def clean_document_batch(documents: List[PDFDocument], **kwargs) -> List[PDFDocument]:
+    """
+    Clean multiple PDF documents in batch.
+    
+    Args:
+        documents: List of PDFDocuments to clean
+        **kwargs: Arguments passed to TextCleaner
+        
+    Returns:
+        List of cleaned PDFDocuments
+    """
+    cleaner = TextCleaner(**kwargs)
+    return [cleaner.clean_document(doc) for doc in documents]
+
+
+# Export main classes
+__all__ = [
+    'TextCleaner',
+    'TextCleaningError',
+    'clean_text_batch',
+    'clean_document_batch',
+]

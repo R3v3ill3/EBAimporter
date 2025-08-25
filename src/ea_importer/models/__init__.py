@@ -1,337 +1,544 @@
 """
-Database models for the EA Importer system.
+Data models for EA Importer system.
+Includes SQLAlchemy ORM models and Pydantic domain objects.
 """
 
-from datetime import datetime, date
-from typing import Optional, Dict, Any, List
-from enum import Enum as PyEnum
+from datetime import datetime
+from pathlib import Path
+from typing import Optional, List, Dict, Any, Tuple
+from enum import Enum
+import json
 
 from sqlalchemy import (
-    Column, Integer, String, Text, DateTime, Date, Boolean, Float,
-    JSON, LargeBinary, ForeignKey, Index, UniqueConstraint, CheckConstraint
+    Column, Integer, String, Text, DateTime, Boolean, Float, 
+    ForeignKey, JSON, LargeBinary, Index, UniqueConstraint
 )
-from sqlalchemy.orm import DeclarativeBase, relationship, Session
-from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import relationship, Session
 from sqlalchemy.sql import func
-import uuid
-
-class Base(DeclarativeBase):
-    pass
+from pydantic import BaseModel, Field, validator
+import numpy as np
 
 
-class OverlayType(PyEnum):
-    """Types of overlays for instance-specific clause modifications."""
+# SQLAlchemy Base
+Base = declarative_base()
+
+
+# Enums for status tracking
+class ProcessingStatus(str, Enum):
+    PENDING = "pending"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
+class AgreementStatus(str, Enum):
+    ACTIVE = "active"
+    EXPIRED = "expired"
+    SUPERSEDED = "superseded"
+    DRAFT = "draft"
+
+
+class OverlayType(str, Enum):
     REPLACE_TEXT = "replace_text"
     APPEND_TEXT = "append_text"
     ADD_CLAUSE = "add_clause"
     REMOVE_CLAUSE = "remove_clause"
+    MODIFY_RATE = "modify_rate"
 
 
-class AgreementStatus(PyEnum):
-    """Status of agreement instances."""
-    ACTIVE = "active"
-    EXPIRED = "expired"
-    SUPERSEDED = "superseded"
-    PENDING = "pending"
-
+# ============================================================================
+# SQLAlchemy ORM Models (Database Schema)
+# ============================================================================
 
 class IngestRun(Base):
-    """Track ingestion runs for auditing and provenance."""
+    """Track ingestion pipeline runs"""
     __tablename__ = "ingest_runs"
     
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    started_at = Column(DateTime(timezone=True), server_default=func.now())
-    completed_at = Column(DateTime(timezone=True), nullable=True)
-    commit_sha = Column(String(40), nullable=True)
-    notes = Column(Text, nullable=True)
-    config_snapshot = Column(JSONB, nullable=True)
-    
-    # Statistics
+    id = Column(Integer, primary_key=True)
+    started_at = Column(DateTime, default=func.now())
+    completed_at = Column(DateTime)
+    commit_sha = Column(String(40))
+    notes = Column(Text)
+    status = Column(String(20), default=ProcessingStatus.PENDING.value)
     files_processed = Column(Integer, default=0)
-    files_succeeded = Column(Integer, default=0)
     files_failed = Column(Integer, default=0)
-    total_clauses = Column(Integer, default=0)
     
     # Relationships
-    agreement_families = relationship("AgreementFamily", back_populates="ingest_run")
+    documents = relationship("Document", back_populates="ingest_run")
+
+
+class Document(Base):
+    """Represents a processed EA document"""
+    __tablename__ = "documents"
     
-    def __repr__(self):
-        return f"<IngestRun(id={self.id}, started_at={self.started_at})>"
+    id = Column(Integer, primary_key=True)
+    ea_id = Column(String(100), unique=True, nullable=False, index=True)
+    file_path = Column(String(500), nullable=False)
+    original_filename = Column(String(255))
+    file_size_bytes = Column(Integer)
+    checksum_sha256 = Column(String(64), index=True)
+    
+    # Processing metadata
+    ingest_run_id = Column(Integer, ForeignKey("ingest_runs.id"))
+    processed_at = Column(DateTime, default=func.now())
+    status = Column(String(20), default=ProcessingStatus.PENDING.value)
+    
+    # Document metadata
+    total_pages = Column(Integer)
+    total_clauses = Column(Integer)
+    has_text_layer = Column(Boolean)
+    ocr_used = Column(Boolean, default=False)
+    
+    # Legal metadata
+    title = Column(String(500))
+    fwc_id = Column(String(100), index=True)
+    jurisdiction = Column(String(100))
+    effective_from = Column(DateTime)
+    effective_to = Column(DateTime)
+    
+    # Relationships
+    ingest_run = relationship("IngestRun", back_populates="documents")
+    clauses = relationship("Clause", back_populates="document", cascade="all, delete-orphan")
+    fingerprints = relationship("DocumentFingerprint", back_populates="document", cascade="all, delete-orphan")
+    family_memberships = relationship("FamilyMember", back_populates="document")
+
+
+class Clause(Base):
+    """Individual clause within a document"""
+    __tablename__ = "clauses"
+    
+    id = Column(Integer, primary_key=True)
+    document_id = Column(Integer, ForeignKey("documents.id"), nullable=False)
+    clause_id = Column(String(50), nullable=False)  # e.g., "2.3.1.a"
+    heading = Column(String(500))
+    text = Column(Text, nullable=False)
+    
+    # Structure
+    path_json = Column(JSON)  # Hierarchical path as JSON array
+    level = Column(Integer, default=0)
+    order_index = Column(Integer, nullable=False)
+    
+    # Content metadata
+    hash_sha256 = Column(String(64), index=True)
+    token_count = Column(Integer)
+    char_count = Column(Integer)
+    page_spans_json = Column(JSON)  # List of [start_page, end_page] ranges
+    
+    # Timing
+    effective_from = Column(DateTime)
+    effective_to = Column(DateTime)
+    
+    # Relationships
+    document = relationship("Document", back_populates="clauses")
+    
+    # Indexes
+    __table_args__ = (
+        Index("idx_document_clause", "document_id", "clause_id"),
+        Index("idx_clause_hash", "hash_sha256"),
+    )
+
+
+class DocumentFingerprint(Base):
+    """Document fingerprints for similarity detection"""
+    __tablename__ = "document_fingerprints"
+    
+    id = Column(Integer, primary_key=True)
+    document_id = Column(Integer, ForeignKey("documents.id"), nullable=False)
+    
+    # Fingerprint data
+    minhash_signature = Column(LargeBinary)  # Serialized MinHash
+    embedding_vector = Column(LargeBinary)   # Optional: serialized embedding
+    
+    # Metadata
+    minhash_permutations = Column(Integer)
+    ngram_size = Column(Integer)
+    created_at = Column(DateTime, default=func.now())
+    
+    # Relationships
+    document = relationship("Document", back_populates="fingerprints")
 
 
 class AgreementFamily(Base):
-    """Groups of similar agreements sharing the same structure and clauses."""
+    """Family of related agreements"""
     __tablename__ = "agreement_families"
     
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id = Column(Integer, primary_key=True)
     title = Column(String(500), nullable=False)
-    jurisdiction = Column(String(100), nullable=False)
-    version = Column(String(50), nullable=False)
-    effective_from = Column(Date, nullable=True)
-    effective_to = Column(Date, nullable=True)
-    checksum = Column(String(64), nullable=False)  # SHA256 of gold content
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
-    locked_at = Column(DateTime(timezone=True), nullable=True)
+    jurisdiction = Column(String(100))
+    version = Column(String(50))
     
-    # Metadata
-    description = Column(Text, nullable=True)
-    industry_sector = Column(String(200), nullable=True)
-    coverage = Column(Text, nullable=True)
-    source_documents = Column(JSONB, nullable=True)  # List of source PDFs
+    # Gold standard info
+    gold_document_id = Column(Integer, ForeignKey("documents.id"))
     
-    # Foreign keys
-    ingest_run_id = Column(UUID(as_uuid=True), ForeignKey("ingest_runs.id"))
-    gold_document_id = Column(String(100), nullable=True)  # Reference to source EA
+    # Lifecycle
+    effective_from = Column(DateTime)
+    effective_to = Column(DateTime)
+    checksum = Column(String(64))
+    created_at = Column(DateTime, default=func.now())
+    locked_at = Column(DateTime)
     
     # Relationships
-    ingest_run = relationship("IngestRun", back_populates="agreement_families")
-    clauses = relationship("FamilyClause", back_populates="family", cascade="all, delete-orphan")
-    rates = relationship("FamilyRate", back_populates="family", cascade="all, delete-orphan")
-    rules = relationship("FamilyRule", back_populates="family", cascade="all, delete-orphan")
-    instances = relationship("AgreementInstance", back_populates="family")
+    gold_document = relationship("Document", foreign_keys=[gold_document_id])
+    members = relationship("FamilyMember", back_populates="family")
+    clauses = relationship("FamilyClause", back_populates="family")
+    rates = relationship("FamilyRate", back_populates="family")
+    rules = relationship("FamilyRule", back_populates="family")
+
+
+class FamilyMember(Base):
+    """Membership of documents in families"""
+    __tablename__ = "family_members"
     
-    # Indexes
+    id = Column(Integer, primary_key=True)
+    family_id = Column(Integer, ForeignKey("agreement_families.id"), nullable=False)
+    document_id = Column(Integer, ForeignKey("documents.id"), nullable=False)
+    
+    # Similarity metrics
+    similarity_score = Column(Float)
+    confidence_level = Column(String(20))  # high, medium, low
+    
+    # Review status
+    human_confirmed = Column(Boolean, default=False)
+    confirmed_by = Column(String(100))
+    confirmed_at = Column(DateTime)
+    
+    # Relationships
+    family = relationship("AgreementFamily", back_populates="members")
+    document = relationship("Document", back_populates="family_memberships")
+    
+    # Constraints
     __table_args__ = (
-        Index("ix_family_jurisdiction_version", "jurisdiction", "version"),
-        Index("ix_family_effective", "effective_from", "effective_to"),
-        UniqueConstraint("title", "version", name="uq_family_title_version"),
+        UniqueConstraint("family_id", "document_id"),
     )
-    
-    def __repr__(self):
-        return f"<AgreementFamily(id={self.id}, title='{self.title}', version='{self.version}')>"
 
 
 class FamilyClause(Base):
-    """Individual clauses within an agreement family."""
+    """Gold standard clauses for a family"""
     __tablename__ = "family_clauses"
     
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    family_id = Column(UUID(as_uuid=True), ForeignKey("agreement_families.id"), nullable=False)
-    clause_id = Column(String(50), nullable=False)  # e.g., "2.3.1.a"
-    heading = Column(String(500), nullable=True)
+    id = Column(Integer, primary_key=True)
+    family_id = Column(Integer, ForeignKey("agreement_families.id"), nullable=False)
+    clause_id = Column(String(50), nullable=False)
+    heading = Column(String(500))
     text = Column(Text, nullable=False)
-    path = Column(JSONB, nullable=False)  # Hierarchical path as array
-    hash_sha256 = Column(String(64), nullable=False)
-    tokens = Column(Integer, nullable=True)
-    page_spans = Column(JSONB, nullable=True)  # [[start_page, end_page], ...]
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
     
-    # Metadata
-    clause_type = Column(String(50), nullable=True)  # 'definition', 'rate', 'procedure', etc.
-    importance_score = Column(Float, nullable=True)
+    # Structure
+    path_json = Column(JSON)
+    hash_sha256 = Column(String(64))
+    token_count = Column(Integer)
+    page_spans_json = Column(JSON)
     
-    # Foreign keys
+    # Source tracking
+    source_document_id = Column(Integer, ForeignKey("documents.id"))
+    source_clause_id = Column(String(50))
+    
+    # Lifecycle
+    effective_from = Column(DateTime)
+    effective_to = Column(DateTime)
+    created_at = Column(DateTime, default=func.now())
+    
+    # Relationships
     family = relationship("AgreementFamily", back_populates="clauses")
-    
-    # Indexes
-    __table_args__ = (
-        Index("ix_clause_family_id", "family_id"),
-        Index("ix_clause_hash", "hash_sha256"),
-        UniqueConstraint("family_id", "clause_id", name="uq_family_clause"),
-    )
-    
-    def __repr__(self):
-        return f"<FamilyClause(family_id={self.family_id}, clause_id='{self.clause_id}')>"
+    source_document = relationship("Document", foreign_keys=[source_document_id])
 
 
 class FamilyRate(Base):
-    """Pay rates and classifications within an agreement family."""
+    """Standardized rates for a family"""
     __tablename__ = "family_rates"
     
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    family_id = Column(UUID(as_uuid=True), ForeignKey("agreement_families.id"), nullable=False)
-    classification = Column(String(200), nullable=False)
-    level = Column(String(50), nullable=True)
-    base_rate = Column(Float, nullable=False)
-    unit = Column(String(20), nullable=False, default="hour")  # hour, week, year
-    effective_from = Column(Date, nullable=True)
-    effective_to = Column(Date, nullable=True)
-    source_clause_id = Column(UUID(as_uuid=True), ForeignKey("family_clauses.id"))
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    id = Column(Integer, primary_key=True)
+    family_id = Column(Integer, ForeignKey("agreement_families.id"), nullable=False)
     
-    # Metadata
-    description = Column(Text, nullable=True)
-    conditions = Column(JSONB, nullable=True)  # Special conditions or qualifiers
+    # Classification
+    classification = Column(String(100), nullable=False)
+    level = Column(String(50))
+    
+    # Rate information
+    base_rate = Column(Float, nullable=False)
+    unit = Column(String(20), default="hourly")  # hourly, weekly, annual
+    
+    # Timing
+    effective_from = Column(DateTime)
+    effective_to = Column(DateTime)
+    
+    # Source
+    source_clause_id = Column(Integer, ForeignKey("family_clauses.id"))
     
     # Relationships
     family = relationship("AgreementFamily", back_populates="rates")
-    source_clause = relationship("FamilyClause")
-    
-    # Indexes
-    __table_args__ = (
-        Index("ix_rate_family_classification", "family_id", "classification"),
-        Index("ix_rate_effective", "effective_from", "effective_to"),
-        CheckConstraint("base_rate > 0", name="ck_rate_positive"),
-    )
-    
-    def __repr__(self):
-        return f"<FamilyRate(family_id={self.family_id}, classification='{self.classification}', rate={self.base_rate})>"
+    source_clause = relationship("FamilyClause", foreign_keys=[source_clause_id])
 
 
 class FamilyRule(Base):
-    """Business rules extracted from agreement families."""
+    """Extracted rules for a family"""
     __tablename__ = "family_rules"
     
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    family_id = Column(UUID(as_uuid=True), ForeignKey("agreement_families.id"), nullable=False)
-    key = Column(String(200), nullable=False)  # e.g., 'overtime_weekday', 'allowance_tool'
-    jsonb_rule = Column(JSONB, nullable=False)  # Rule definition and parameters
-    source_clause_id = Column(UUID(as_uuid=True), ForeignKey("family_clauses.id"))
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    id = Column(Integer, primary_key=True)
+    family_id = Column(Integer, ForeignKey("agreement_families.id"), nullable=False)
     
-    # Metadata
-    rule_type = Column(String(50), nullable=True)  # 'penalty', 'allowance', 'condition'
-    priority = Column(Integer, default=0)
-    description = Column(Text, nullable=True)
+    # Rule identification
+    key = Column(String(100), nullable=False)  # e.g., "overtime_weekday", "penalty_sunday"
+    rule_type = Column(String(50))  # penalty, allowance, overtime, etc.
+    
+    # Rule data (flexible JSON structure)
+    jsonb_rule = Column(JSON, nullable=False)
+    
+    # Source
+    source_clause_id = Column(Integer, ForeignKey("family_clauses.id"))
+    
+    # Lifecycle
+    effective_from = Column(DateTime)
+    effective_to = Column(DateTime)
+    created_at = Column(DateTime, default=func.now())
     
     # Relationships
     family = relationship("AgreementFamily", back_populates="rules")
-    source_clause = relationship("FamilyClause")
-    
-    # Indexes
-    __table_args__ = (
-        Index("ix_rule_family_key", "family_id", "key"),
-        UniqueConstraint("family_id", "key", name="uq_family_rule_key"),
-    )
-    
-    def __repr__(self):
-        return f"<FamilyRule(family_id={self.family_id}, key='{self.key}')>"
+    source_clause = relationship("FamilyClause", foreign_keys=[source_clause_id])
 
 
 class AgreementInstance(Base):
-    """Specific instances of agreements with employer and timing information."""
-    __tablename__ = "agreements_instances"
+    """Specific instances of agreements (employers)"""
+    __tablename__ = "agreement_instances"
     
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    family_id = Column(UUID(as_uuid=True), ForeignKey("agreement_families.id"), nullable=False)
-    employer_id = Column(String(100), nullable=True)  # Could be ABN or internal ID
-    fwc_id = Column(String(50), nullable=True)  # Fair Work Commission ID
-    commencement = Column(Date, nullable=True)
-    nominal_expiry = Column(Date, nullable=True)
-    status = Column(String(20), nullable=False, default=AgreementStatus.ACTIVE.value)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    id = Column(Integer, primary_key=True)
+    family_id = Column(Integer, ForeignKey("agreement_families.id"), nullable=False)
+    
+    # Instance identification
+    instance_key = Column(String(100), unique=True, nullable=False)
+    employer_id = Column(String(100))
+    fwc_id = Column(String(100), index=True)
+    
+    # Timing
+    commencement = Column(DateTime)
+    nominal_expiry = Column(DateTime)
+    status = Column(String(20), default=AgreementStatus.ACTIVE.value)
     
     # Metadata
-    title = Column(String(500), nullable=True)
-    employer_name = Column(String(300), nullable=True)
-    coverage_description = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=func.now())
     
     # Relationships
-    family = relationship("AgreementFamily", back_populates="instances")
-    parameters = relationship("InstanceParam", back_populates="instance", cascade="all, delete-orphan")
-    overlays = relationship("InstanceOverlay", back_populates="instance", cascade="all, delete-orphan")
-    
-    # Indexes
-    __table_args__ = (
-        Index("ix_instance_family_employer", "family_id", "employer_id"),
-        Index("ix_instance_fwc", "fwc_id"),
-        Index("ix_instance_dates", "commencement", "nominal_expiry"),
-    )
-    
-    def __repr__(self):
-        return f"<AgreementInstance(id={self.id}, family_id={self.family_id}, employer='{self.employer_name}')>"
+    family = relationship("AgreementFamily", foreign_keys=[family_id])
+    parameters = relationship("InstanceParameter", back_populates="instance")
+    overlays = relationship("InstanceOverlay", back_populates="instance")
 
 
-class InstanceParam(Base):
-    """Parameters specific to agreement instances (employer details, pay steps, etc.)."""
-    __tablename__ = "instance_params"
+class InstanceParameter(Base):
+    """Parameters for agreement instances"""
+    __tablename__ = "instance_parameters"
     
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    instance_id = Column(UUID(as_uuid=True), ForeignKey("agreements_instances.id"), nullable=False)
-    key = Column(String(100), nullable=False)  # e.g., 'employer_abn', 'pay_steps'
-    value = Column(JSONB, nullable=False)  # JSON value (string, number, object, array)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    id = Column(Integer, primary_key=True)
+    instance_id = Column(Integer, ForeignKey("agreement_instances.id"), nullable=False)
+    
+    key = Column(String(100), nullable=False)  # employer_name, abn, pay_steps, etc.
+    value = Column(Text)  # Can be JSON for complex values
+    data_type = Column(String(20), default="string")  # string, json, number, date
     
     # Relationships
     instance = relationship("AgreementInstance", back_populates="parameters")
     
-    # Indexes
+    # Constraints
     __table_args__ = (
-        Index("ix_param_instance_key", "instance_id", "key"),
-        UniqueConstraint("instance_id", "key", name="uq_instance_param_key"),
+        UniqueConstraint("instance_id", "key"),
     )
-    
-    def __repr__(self):
-        return f"<InstanceParam(instance_id={self.instance_id}, key='{self.key}')>"
 
 
 class InstanceOverlay(Base):
-    """Overlays for instance-specific clause modifications."""
+    """Overlays for instance-specific modifications"""
     __tablename__ = "instance_overlays"
     
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    instance_id = Column(UUID(as_uuid=True), ForeignKey("agreements_instances.id"), nullable=False)
-    clause_id = Column(String(50), nullable=False)  # References family clause
-    overlay_type = Column(String(20), nullable=False)  # OverlayType enum
-    payload_jsonb = Column(JSONB, nullable=False)  # Overlay content
-    effective_from = Column(Date, nullable=True)
-    effective_to = Column(Date, nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    id = Column(Integer, primary_key=True)
+    instance_id = Column(Integer, ForeignKey("agreement_instances.id"), nullable=False)
+    clause_id = Column(String(50), nullable=False)
     
-    # Metadata
-    description = Column(Text, nullable=True)
-    applied_by = Column(String(100), nullable=True)  # User who applied overlay
+    overlay_type = Column(String(20), nullable=False)  # OverlayType enum
+    payload_jsonb = Column(JSON, nullable=False)
+    
+    # Timing
+    effective_from = Column(DateTime)
+    effective_to = Column(DateTime)
+    created_at = Column(DateTime, default=func.now())
     
     # Relationships
     instance = relationship("AgreementInstance", back_populates="overlays")
-    
-    # Indexes
-    __table_args__ = (
-        Index("ix_overlay_instance_clause", "instance_id", "clause_id"),
-        Index("ix_overlay_effective", "effective_from", "effective_to"),
-        CheckConstraint(
-            f"overlay_type IN {tuple(t.value for t in OverlayType)}",
-            name="ck_overlay_type"
-        ),
-    )
-    
-    def __repr__(self):
-        return f"<InstanceOverlay(instance_id={self.instance_id}, clause_id='{self.clause_id}', type='{self.overlay_type}')>"
 
 
-# Additional utility tables for clustering and QA
+class ClusteringRun(Base):
+    """Track clustering analysis runs"""
+    __tablename__ = "clustering_runs"
+    
+    id = Column(Integer, primary_key=True)
+    run_id = Column(String(100), unique=True, nullable=False)
+    
+    # Parameters
+    algorithm = Column(String(50))
+    parameters_json = Column(JSON)
+    
+    # Results
+    total_documents = Column(Integer)
+    families_created = Column(Integer)
+    singletons = Column(Integer)
+    
+    # Timing
+    started_at = Column(DateTime, default=func.now())
+    completed_at = Column(DateTime)
+    status = Column(String(20), default=ProcessingStatus.PENDING.value)
 
-class ClusterRun(Base):
-    """Track clustering operations."""
-    __tablename__ = "cluster_runs"
+
+# ============================================================================
+# Pydantic Domain Models (for API and processing)
+# ============================================================================
+
+class PDFPage(BaseModel):
+    """Represents a single page from a PDF"""
+    page_number: int
+    text: str
+    bbox: Optional[Tuple[float, float, float, float]] = None
+    has_images: bool = False
+    tables: List[Dict[str, Any]] = Field(default_factory=list)
     
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    run_id = Column(String(100), nullable=False, unique=True)
-    started_at = Column(DateTime(timezone=True), server_default=func.now())
-    completed_at = Column(DateTime(timezone=True), nullable=True)
-    algorithm = Column(String(50), nullable=False)  # e.g., 'minhash', 'hdbscan'
-    parameters = Column(JSONB, nullable=False)
-    num_documents = Column(Integer, nullable=False)
-    num_clusters = Column(Integer, nullable=True)
-    
-    def __repr__(self):
-        return f"<ClusterRun(run_id='{self.run_id}', algorithm='{self.algorithm}')>"
+    class Config:
+        arbitrary_types_allowed = True
 
 
-class DocumentFingerprint(Base):
-    """Store document fingerprints for similarity comparison."""
-    __tablename__ = "document_fingerprints"
+class PDFDocument(BaseModel):
+    """Represents a complete PDF document"""
+    file_path: Path
+    pages: List[PDFPage] = Field(default_factory=list)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
     
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    ea_id = Column(String(100), nullable=False, unique=True)
-    sha256_hash = Column(String(64), nullable=False)
-    minhash_signature = Column(LargeBinary, nullable=False)  # Serialized MinHash
-    embedding = Column(LargeBinary, nullable=True)  # Optional embedding vector
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    @property
+    def total_pages(self) -> int:
+        return len(self.pages)
     
-    # Metadata
-    file_path = Column(String(500), nullable=True)
-    file_size = Column(Integer, nullable=True)
-    num_pages = Column(Integer, nullable=True)
-    num_clauses = Column(Integer, nullable=True)
+    @property
+    def full_text(self) -> str:
+        return "\n".join(page.text for page in self.pages)
     
-    __table_args__ = (
-        Index("ix_fingerprint_sha256", "sha256_hash"),
-        Index("ix_fingerprint_ea_id", "ea_id"),
-    )
+    @property
+    def page_texts(self) -> List[str]:
+        return [page.text for page in self.pages]
     
-    def __repr__(self):
-        return f"<DocumentFingerprint(ea_id='{self.ea_id}', sha256='{self.sha256_hash[:16]}...')>"
+    class Config:
+        arbitrary_types_allowed = True
+
+
+class ClauseSegment(BaseModel):
+    """Represents a segmented clause"""
+    ea_id: str
+    clause_id: str
+    path: List[str] = Field(default_factory=list)
+    heading: Optional[str] = None
+    text: str
+    hash_sha256: Optional[str] = None
+    token_count: Optional[int] = None
+    page_spans: List[Tuple[int, int]] = Field(default_factory=list)
+    effective_from: Optional[datetime] = None
+    effective_to: Optional[datetime] = None
+    
+    @validator('text')
+    def text_not_empty(cls, v):
+        if not v.strip():
+            raise ValueError("Clause text cannot be empty")
+        return v
+    
+    class Config:
+        json_encoders = {
+            datetime: lambda v: v.isoformat() if v else None
+        }
+
+
+class DocumentFingerprint(BaseModel):
+    """Document fingerprint for similarity detection"""
+    ea_id: str
+    minhash_signature: bytes
+    embedding_vector: Optional[np.ndarray] = None
+    minhash_permutations: int = 128
+    ngram_size: int = 5
+    created_at: datetime = Field(default_factory=datetime.now)
+    
+    class Config:
+        arbitrary_types_allowed = True
+
+
+class SimilarityMatrix(BaseModel):
+    """Similarity matrix for clustering"""
+    document_ids: List[str]
+    similarity_scores: np.ndarray
+    algorithm: str
+    threshold: float
+    created_at: datetime = Field(default_factory=datetime.now)
+    
+    class Config:
+        arbitrary_types_allowed = True
+
+
+class ClusterCandidate(BaseModel):
+    """Candidate family from clustering"""
+    cluster_id: str
+    document_ids: List[str]
+    similarity_scores: List[float]
+    confidence_level: str  # high, medium, low
+    suggested_title: Optional[str] = None
+    
+    @validator('confidence_level')
+    def validate_confidence(cls, v):
+        if v not in ['high', 'medium', 'low']:
+            raise ValueError("Confidence level must be high, medium, or low")
+        return v
+
+
+class FamilyCandidate(BaseModel):
+    """Family building candidate"""
+    family_id: str
+    title: str
+    gold_document_id: str
+    member_document_ids: List[str]
+    similarity_matrix: Dict[str, float]
+    status: str = "pending_review"
+
+
+class RateExtraction(BaseModel):
+    """Extracted rate information"""
+    classification: str
+    level: Optional[str] = None
+    base_rate: float
+    unit: str = "hourly"
+    source_clause_id: str
+    effective_from: Optional[datetime] = None
+    effective_to: Optional[datetime] = None
+
+
+class RuleExtraction(BaseModel):
+    """Extracted rule information"""
+    key: str
+    rule_type: str
+    rule_data: Dict[str, Any]
+    source_clause_id: str
+    effective_from: Optional[datetime] = None
+    effective_to: Optional[datetime] = None
+
+
+class QATestResult(BaseModel):
+    """Quality assurance test result"""
+    test_id: str
+    family_id: str
+    worker_scenario: Dict[str, Any]
+    test_results: Dict[str, Any]
+    anomalies: List[str] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)
+    passed: bool
+    execution_time_seconds: float
+
+
+class VersionManifest(BaseModel):
+    """Version control manifest"""
+    version: str
+    created_at: datetime
+    locked_at: Optional[datetime] = None
+    commit_sha: Optional[str] = None
+    families_count: int
+    instances_count: int
+    checksums: Dict[str, str] = Field(default_factory=dict)
+    notes: Optional[str] = None
