@@ -14,8 +14,15 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.panel import Panel
 
 from ..utils.csv_batch_importer import CSVBatchImporter, import_fwc_search_results, import_url_list
-from ..database import get_db_session
-from ..models import BatchImportJob, BatchImportResult
+try:
+    from ..database import get_db_session  # type: ignore
+    from ..models import BatchImportJob, BatchImportResult  # type: ignore
+    _DB_AVAILABLE = True
+except Exception:
+    get_db_session = None  # type: ignore
+    BatchImportJob = None  # type: ignore
+    BatchImportResult = None  # type: ignore
+    _DB_AVAILABLE = False
 from ..core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -71,18 +78,23 @@ def import_csv(
                 table.add_column("Metric", style="cyan")
                 table.add_column("Count", justify="right", style="magenta")
                 
-                table.add_row("Job ID", str(job.id))
-                table.add_row("Job Name", job.job_name)
-                table.add_row("Total Items", str(job.total_items))
-                table.add_row("Processed", str(job.processed_items))
-                table.add_row("Successful", str(job.successful_items))
-                table.add_row("Failed", str(job.failed_items))
-                table.add_row("Success Rate", f"{(job.successful_items/job.total_items*100):.1f}%" if job.total_items > 0 else "0%")
+                job_id = getattr(job, 'id', 0)
+                total_items = getattr(job, 'total_items', 0)
+                processed_items = getattr(job, 'processed_items', total_items)
+                successful_items = getattr(job, 'successful_items', processed_items)
+                failed_items = getattr(job, 'failed_items', 0)
+                table.add_row("Job ID", str(job_id))
+                table.add_row("Job Name", getattr(job, 'job_name', 'CSV Import'))
+                table.add_row("Total Items", str(total_items))
+                table.add_row("Processed", str(processed_items))
+                table.add_row("Successful", str(successful_items))
+                table.add_row("Failed", str(failed_items))
+                table.add_row("Success Rate", f"{(successful_items/total_items*100):.1f}%" if total_items > 0 else "0%")
                 
                 console.print(table)
                 
-                if job.failed_items > 0:
-                    console.print(f"\n[yellow]Warning: {job.failed_items} items failed. Use 'ea-importer csv status {job.id}' for details.[/yellow]")
+                if failed_items > 0 and _DB_AVAILABLE:
+                    console.print(f"\n[yellow]Warning: {failed_items} items failed. Use 'ea-importer csv status {job_id}' for details.[/yellow]")
                 
             except Exception as e:
                 progress.update(task, description="Import failed")
@@ -177,6 +189,9 @@ def job_status(
 ):
     """Show status of a batch import job."""
     
+    if not _DB_AVAILABLE:
+        console.print("[yellow]Status is only available when DB is configured.[/yellow]")
+        raise typer.Exit(0)
     importer = CSVBatchImporter()
     job = importer.get_job_status(job_id)
     
@@ -219,7 +234,7 @@ def job_status(
     
     # Show failed items if any
     if job.failed_items > 0:
-        with get_db_session() as session:
+        with get_db_session() as session:  # type: ignore[arg-type]
             failed_results = session.query(BatchImportResult).filter(
                 BatchImportResult.job_id == job_id,
                 BatchImportResult.status == 'failed'
