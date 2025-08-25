@@ -117,6 +117,7 @@ class PathConfig(BaseSettings):
     data_dir: Path = Field(default=Path("data"), description="Base data directory")
     reports_dir: Path = Field(default=Path("reports"), description="Reports output directory")
     versions_dir: Path = Field(default=Path("versions"), description="Version control directory")
+    upload_dir: Path = Field(default=Path("data/uploads"), description="Upload and download working directory")
     
     # Subdirectories will be created relative to data_dir
     @property
@@ -214,6 +215,7 @@ class Settings(BaseSettings):
         """Create all necessary directories"""
         directories = [
             self.paths.data_dir,
+            self.paths.upload_dir,
             self.paths.raw_pdfs_dir,
             self.paths.text_dir,
             self.paths.clauses_dir,

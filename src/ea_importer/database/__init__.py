@@ -158,8 +158,9 @@ class DatabaseManager:
             True if connection is successful
         """
         try:
+            from sqlalchemy import text
             with self.get_session() as session:
-                session.execute("SELECT 1")
+                session.execute(text("SELECT 1"))
                 return True
         except Exception as e:
             logger.error(f"Database connection test failed: {e}")

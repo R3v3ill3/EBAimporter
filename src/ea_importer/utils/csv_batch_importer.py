@@ -36,10 +36,30 @@ import time
 
 from ..core.config import get_settings
 from ..core.logging import get_logger, log_function_call
-from ..database import get_db_session
-from ..models import DocumentDB, BatchImportJob, BatchImportResult
+
+# Optional DB imports (DB-optional mode)
+try:
+    from ..database import get_db_session  # type: ignore
+    DB_SESSION_AVAILABLE = True
+except Exception:
+    get_db_session = None  # type: ignore
+    DB_SESSION_AVAILABLE = False
+
+try:
+    from ..models import Document as DocumentDB  # type: ignore
+    from ..models import IngestRun as BatchImportJob  # type: ignore
+    from ..models import Clause as BatchImportResult  # type: ignore
+    DB_MODELS_AVAILABLE = True
+except Exception:
+    DocumentDB = None  # type: ignore
+    BatchImportJob = None  # type: ignore
+    BatchImportResult = None  # type: ignore
+    DB_MODELS_AVAILABLE = False
+
 from ..utils.pdf_processor import PDFProcessor
-from ..pipeline.ingest_pipeline import IngestPipeline
+from ..utils.text_cleaner import TextCleaner
+from ..utils.text_segmenter import TextSegmenter
+from ..utils.fingerprinter import Fingerprinter
 
 logger = get_logger(__name__)
 
@@ -61,7 +81,10 @@ class CSVBatchImporter:
         self.session_timeout = session_timeout
         self.max_concurrent = max_concurrent
         self.pdf_processor = PDFProcessor()
-        self.ingest_pipeline = IngestPipeline()
+        self.text_cleaner = TextCleaner()
+        self.text_segmenter = TextSegmenter()
+        self.fingerprinter = Fingerprinter()
+        self._db_enabled = DB_SESSION_AVAILABLE and DB_MODELS_AVAILABLE
         
         # Create download directory
         self.download_dir = Path(self.settings.paths.upload_dir) / "batch_downloads"
@@ -74,7 +97,7 @@ class CSVBatchImporter:
         job_name: str = None,
         auto_process: bool = True,
         resume_job_id: Optional[int] = None
-    ) -> BatchImportJob:
+    ) -> Any:
         """
         Import Enterprise Agreements from CSV file.
         
@@ -91,44 +114,66 @@ class CSVBatchImporter:
         if not job_name:
             job_name = f"CSV_Import_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         
-        # Create or resume batch import job
-        with get_db_session() as session:
-            if resume_job_id:
-                job = session.query(BatchImportJob).filter(
-                    BatchImportJob.id == resume_job_id
-                ).first()
-                if not job:
-                    raise ValueError(f"Job {resume_job_id} not found")
-                logger.info(f"Resuming batch import job: {job.job_name}")
-            else:
-                job = BatchImportJob(
-                    job_name=job_name,
-                    source_type="csv",
-                    source_path=csv_file_path,
-                    status="running",
-                    total_items=0,
-                    processed_items=0,
-                    successful_items=0,
-                    failed_items=0,
-                    settings={
-                        "auto_process": auto_process,
-                        "session_timeout": self.session_timeout,
-                        "max_concurrent": self.max_concurrent
-                    }
-                )
-                session.add(job)
-                session.flush()  # Get job ID
-                logger.info(f"Created batch import job: {job.job_name} (ID: {job.id})")
+        # Create or resume batch import job (DB-optional)
+        if self._db_enabled and get_db_session and BatchImportJob:
+            with get_db_session() as session:  # type: ignore[arg-type]
+                if resume_job_id:
+                    job = session.query(BatchImportJob).filter(  # type: ignore[call-arg]
+                        BatchImportJob.id == resume_job_id  # type: ignore[attr-defined]
+                    ).first()
+                    if not job:
+                        raise ValueError(f"Job {resume_job_id} not found")
+                    logger.info(f"Resuming batch import job: {job.job_name}")
+                else:
+                    job = BatchImportJob(  # type: ignore[call-arg]
+                        job_name=job_name,
+                        source_type="csv",
+                        source_path=csv_file_path,
+                        status="running",
+                        total_items=0,
+                        processed_items=0,
+                        successful_items=0,
+                        failed_items=0,
+                        settings={
+                            "auto_process": auto_process,
+                            "session_timeout": self.session_timeout,
+                            "max_concurrent": self.max_concurrent
+                        }
+                    )
+                    session.add(job)
+                    session.flush()  # Get job ID
+                    logger.info(f"Created batch import job: {job.job_name} (ID: {job.id})")
+        else:
+            # Simple in-memory job object for CLI display compatibility
+            class _SimpleJob:
+                def __init__(self, name: str, source_path: str):
+                    self.id = 0
+                    self.job_name = name
+                    self.source_type = "csv"
+                    self.source_path = source_path
+                    self.status = "running"
+                    self.total_items = 0
+                    self.processed_items = 0
+                    self.successful_items = 0
+                    self.failed_items = 0
+                    self.created_at = datetime.utcnow()
+                    self.completed_at = None
+                    self.error_message = None
+            job = _SimpleJob(job_name, csv_file_path)
         
         try:
             # Parse CSV file
             csv_records = await self._parse_csv_file(csv_file_path)
             
             # Update total items count
-            with get_db_session() as session:
-                job = session.query(BatchImportJob).filter(BatchImportJob.id == job.id).first()
+            if self._db_enabled and get_db_session and BatchImportJob:
+                with get_db_session() as session:  # type: ignore[arg-type]
+                    db_job = session.query(BatchImportJob).filter(BatchImportJob.id == job.id).first()  # type: ignore[call-arg]
+                    if db_job:
+                        db_job.total_items = len(csv_records)
+                        session.commit()
+            else:
                 job.total_items = len(csv_records)
-                session.commit()
             
             logger.info(f"Found {len(csv_records)} records in CSV file")
             
@@ -140,7 +185,7 @@ class CSVBatchImporter:
             ) as http_session:
                 
                 tasks = [
-                    self._process_csv_record(semaphore, http_session, job.id, record, auto_process)
+                    self._process_csv_record(semaphore, http_session, getattr(job, 'id', 0), record, auto_process)
                     for record in csv_records
                 ]
                 
@@ -160,14 +205,20 @@ class CSVBatchImporter:
                         completed_tasks += 1
             
             # Final progress update
-            await self._update_job_progress(job.id)
+            if self._db_enabled:
+                await self._update_job_progress(getattr(job, 'id', 0))
             
             # Mark job as completed
-            with get_db_session() as session:
-                job = session.query(BatchImportJob).filter(BatchImportJob.id == job.id).first()
+            if self._db_enabled and get_db_session and BatchImportJob:
+                with get_db_session() as session:  # type: ignore[arg-type]
+                    db_job = session.query(BatchImportJob).filter(BatchImportJob.id == job.id).first()  # type: ignore[call-arg]
+                    if db_job:
+                        db_job.status = "completed"
+                        db_job.completed_at = datetime.utcnow()
+                        session.commit()
+            else:
                 job.status = "completed"
                 job.completed_at = datetime.utcnow()
-                session.commit()
                 
             logger.info(f"Batch import job completed: {job.successful_items}/{job.total_items} successful")
             return job
@@ -176,12 +227,17 @@ class CSVBatchImporter:
             logger.error(f"Batch import job failed: {e}")
             
             # Mark job as failed
-            with get_db_session() as session:
-                job = session.query(BatchImportJob).filter(BatchImportJob.id == job.id).first()
+            if self._db_enabled and get_db_session and BatchImportJob:
+                with get_db_session() as session:  # type: ignore[arg-type]
+                    db_job = session.query(BatchImportJob).filter(BatchImportJob.id == job.id).first()  # type: ignore[call-arg]
+                    if db_job:
+                        db_job.status = "failed"
+                        db_job.error_message = str(e)
+                        db_job.completed_at = datetime.utcnow()
+                        session.commit()
+            else:
                 job.status = "failed"
                 job.error_message = str(e)
-                job.completed_at = datetime.utcnow()
-                session.commit()
             
             raise
     
@@ -196,62 +252,87 @@ class CSVBatchImporter:
         # Parse CSV content
         csv_reader = csv.DictReader(content.splitlines())
         
+        # We accept multiple header variants and map to our canonical fields
         required_fields = ['url', 'title']
-        optional_fields = [
-            'employer', 'union', 'industry', 'effective_date', 'expiry_date',
-            'status', 'fwc_code', 'metadata'
-        ]
         
         for row_num, row in enumerate(csv_reader, start=2):  # Start at 2 for header
             try:
-                # Validate required fields
-                missing_fields = [field for field in required_fields if not row.get(field)]
-                if missing_fields:
-                    logger.warning(f"Row {row_num}: Missing required fields: {missing_fields}")
+                # Case-insensitive key access
+                lower_row = {k.strip(): v for k, v in row.items()}
+                key_map = {k.lower(): k for k in lower_row.keys()}
+
+                def get_any(keys: List[str]) -> str:
+                    for k in keys:
+                        if k.lower() in key_map and lower_row.get(key_map[k.lower()]):
+                            return lower_row[key_map[k.lower()]].strip()
+                    return ""
+
+                # Map fields
+                url_val = get_any(["url", "PDF_URL", "pdf_url"]) or get_any(["link", "href"])
+                title_val = get_any(["title", "Title", "DocumentTitle", "AgreementTitle"]) or ""
+                employer_val = get_any(["employer", "PartyName"]) or ""
+                fwc_code_val = get_any(["fwc_code", "PublicationID", "AgmntMNC"]) or ""
+                status_val = get_any(["status"]) or "unknown"
+                industry_val = get_any(["industry"]) or ""
+                union_val = get_any(["union"]) or ""
+
+                # Validate required
+                if not url_val or not self._is_valid_url(url_val):
+                    logger.warning(f"Row {row_num}: Invalid or missing URL")
                     continue
-                
-                # Validate URL
-                if not self._is_valid_url(row['url']):
-                    logger.warning(f"Row {row_num}: Invalid URL: {row['url']}")
+                if not title_val:
+                    logger.warning(f"Row {row_num}: Missing title")
                     continue
-                
-                # Parse dates
+
                 record = {
                     'row_number': row_num,
-                    'url': row['url'].strip(),
-                    'title': row['title'].strip(),
-                    'employer': row.get('employer', '').strip(),
-                    'union': row.get('union', '').strip(),
-                    'industry': row.get('industry', '').strip(),
-                    'status': row.get('status', 'unknown').strip(),
-                    'fwc_code': row.get('fwc_code', '').strip()
+                    'url': url_val,
+                    'title': title_val,
+                    'employer': employer_val,
+                    'union': union_val,
+                    'industry': industry_val,
+                    'status': status_val,
+                    'fwc_code': fwc_code_val,
                 }
-                
-                # Parse dates
-                for date_field in ['effective_date', 'expiry_date']:
-                    date_str = row.get(date_field, '').strip()
-                    if date_str:
-                        try:
-                            record[date_field] = datetime.strptime(date_str, '%Y-%m-%d').date()
-                        except ValueError:
-                            logger.warning(f"Row {row_num}: Invalid date format for {date_field}: {date_str}")
-                            record[date_field] = None
-                    else:
-                        record[date_field] = None
-                
-                # Parse metadata JSON
-                metadata_str = row.get('metadata', '').strip()
-                if metadata_str:
+
+                # Dates
+                eff_dt = get_any(["effective_date"]) or ""
+                exp_dt = get_any(["expiry_date", "NominalExpiryDate"]) or ""
+                def parse_date(val: str) -> Optional[date]:
+                    if not val:
+                        return None
                     try:
-                        record['metadata'] = json.loads(metadata_str)
+                        return datetime.strptime(val, '%Y-%m-%d').date()
+                    except Exception:
+                        try:
+                            # ISO datetime with Z
+                            return datetime.fromisoformat(val.replace('Z', '+00:00')).date()
+                        except Exception:
+                            logger.warning(f"Row {row_num}: Invalid date format: {val}")
+                            return None
+                record['effective_date'] = parse_date(eff_dt)
+                record['expiry_date'] = parse_date(exp_dt)
+
+                # Extra metadata
+                metadata: Dict[str, Any] = {}
+                for key in [
+                    'Summary', 'AgreementMembers', 'ABN', 'MatterName',
+                    'DocumentTitle', 'AgreementTitle'
+                ]:
+                    val = get_any([key])
+                    if val:
+                        metadata[key] = val
+                # If provided explicit metadata json field, merge
+                metadata_json = get_any(["metadata"])
+                if metadata_json:
+                    try:
+                        metadata.update(json.loads(metadata_json))
                     except json.JSONDecodeError:
-                        logger.warning(f"Row {row_num}: Invalid JSON metadata: {metadata_str}")
-                        record['metadata'] = {}
-                else:
-                    record['metadata'] = {}
-                
+                        logger.warning(f"Row {row_num}: Invalid JSON metadata: {metadata_json}")
+                record['metadata'] = metadata
+
                 records.append(record)
-                
+
             except Exception as e:
                 logger.error(f"Row {row_num}: Error parsing record: {e}")
                 continue
@@ -266,7 +347,7 @@ class CSVBatchImporter:
         job_id: int,
         record: Dict[str, Any],
         auto_process: bool
-    ) -> BatchImportResult:
+    ) -> Any:
         """Process a single CSV record."""
         
         async with semaphore:
@@ -287,87 +368,119 @@ class CSVBatchImporter:
                 if not await self._validate_pdf(file_path):
                     raise ValueError("Downloaded file is not a valid PDF")
                 
-                # Create document record
-                with get_db_session() as session:
-                    document = DocumentDB(
-                        file_path=str(file_path),
-                        file_name=filename,
-                        file_size=file_path.stat().st_size,
-                        source_url=record['url'],
-                        title=record['title'],
-                        employer=record['employer'],
-                        union=record['union'],
-                        industry=record['industry'],
-                        effective_date=record['effective_date'],
-                        expiry_date=record['expiry_date'],
-                        status=record['status'],
-                        fwc_code=record['fwc_code'],
-                        metadata=record['metadata'],
-                        processing_status='downloaded'
-                    )
-                    session.add(document)
-                    session.flush()
-                    document_id = document.id
+                document_id = None
+                if self._db_enabled and get_db_session and DocumentDB:
+                    with get_db_session() as session:  # type: ignore[arg-type]
+                        document = DocumentDB(
+                            file_path=str(file_path),
+                            original_filename=filename,
+                            file_size_bytes=file_path.stat().st_size,
+                            status=record['status'],
+                            fwc_id=record['fwc_code'],
+                            title=record['title'],
+                            jurisdiction=None,
+                        )  # type: ignore[call-arg]
+                        session.add(document)
+                        session.flush()
+                        document_id = document.id
                 
                 # Auto-process if enabled
                 if auto_process:
                     try:
-                        await self._process_document(document_id, file_path)
+                        # Full processing pipeline using utilities
+                        document = self.pdf_processor.process_pdf(file_path)
+                        cleaned_doc = self.text_cleaner.clean_document(document)
+                        clauses = self.text_segmenter.segment_document(cleaned_doc)
+                        fingerprint = self.fingerprinter.fingerprint_document(document)
+
+                        # Save artifacts
+                        ea_id = document.metadata.get('ea_id')
+                        text_dir = Path(self.settings.paths.text_dir)
+                        text_dir.mkdir(parents=True, exist_ok=True)
+                        with open(text_dir / f"{ea_id}.txt", 'w', encoding='utf-8') as f:
+                            f.write(document.full_text)
+
+                        clauses_dir = Path(self.settings.paths.clauses_dir)
+                        clauses_dir.mkdir(parents=True, exist_ok=True)
+                        with open(clauses_dir / f"{ea_id}.jsonl", 'w', encoding='utf-8') as f:
+                            for c in clauses:
+                                f.write(json.dumps({
+                                    'ea_id': c.ea_id,
+                                    'clause_id': c.clause_id,
+                                    'heading': c.heading,
+                                    'text': c.text,
+                                    'path': c.path,
+                                    'hash_sha256': c.hash_sha256,
+                                    'token_count': c.token_count
+                                }) + '\n')
+
+                        fp_dir = Path(self.settings.paths.fingerprints_dir)
+                        self.fingerprinter.save_fingerprint(fingerprint, fp_dir)
+
                         processing_status = 'completed'
                         error_message = None
                     except Exception as e:
                         logger.error(f"Processing failed for {filename}: {e}")
                         processing_status = 'processing_failed'
                         error_message = str(e)
-                        
-                        # Update document status
-                        with get_db_session() as session:
-                            doc = session.query(DocumentDB).filter(DocumentDB.id == document_id).first()
-                            if doc:
-                                doc.processing_status = processing_status
-                                doc.error_message = error_message
-                                session.commit()
+                        if self._db_enabled and get_db_session and DocumentDB and document_id is not None:
+                            with get_db_session() as session:  # type: ignore[arg-type]
+                                doc = session.query(DocumentDB).filter(DocumentDB.id == document_id).first()
+                                if doc:
+                                    setattr(doc, 'status', 'processing_failed')
+                                    session.commit()
                 else:
                     processing_status = 'downloaded'
                     error_message = None
                 
-                # Create result record
-                result = BatchImportResult(
-                    job_id=job_id,
-                    row_number=record['row_number'],
-                    source_url=record['url'],
-                    document_id=document_id,
-                    status='success',
-                    processing_time_seconds=time.time() - start_time,
-                    file_path=str(file_path),
-                    file_size=file_path.stat().st_size
-                )
-                
-                with get_db_session() as session:
-                    session.add(result)
-                    session.commit()
-                
-                logger.info(f"Successfully processed: {record['title']}")
-                return result
+                # Create result record or simple dict
+                if self._db_enabled and get_db_session and BatchImportResult:
+                    result = BatchImportResult(  # type: ignore[call-arg]
+                        job_id=job_id,
+                        row_number=record['row_number'],
+                        source_url=record['url'],
+                        status='success',
+                        # Store limited info; schema differs from ORM here
+                    )
+                    with get_db_session() as session:  # type: ignore[arg-type]
+                        session.add(result)
+                        session.commit()
+                    logger.info(f"Successfully processed: {record['title']}")
+                    return result
+                else:
+                    logger.info(f"Successfully processed: {record['title']}")
+                    return {
+                        'row_number': record['row_number'],
+                        'source_url': record['url'],
+                        'status': 'success',
+                        'processing_time_seconds': time.time() - start_time,
+                        'file_path': str(file_path),
+                        'file_size': file_path.stat().st_size
+                    }
                 
             except Exception as e:
                 logger.error(f"Failed to process record {record['row_number']}: {e}")
                 
                 # Create error result
-                result = BatchImportResult(
-                    job_id=job_id,
-                    row_number=record['row_number'],
-                    source_url=record['url'],
-                    status='failed',
-                    error_message=str(e),
-                    processing_time_seconds=time.time() - start_time
-                )
-                
-                with get_db_session() as session:
-                    session.add(result)
-                    session.commit()
-                
-                return result
+                if self._db_enabled and get_db_session and BatchImportResult:
+                    result = BatchImportResult(  # type: ignore[call-arg]
+                        job_id=job_id,
+                        row_number=record['row_number'],
+                        source_url=record['url'],
+                        status='failed',
+                    )
+                    with get_db_session() as session:  # type: ignore[arg-type]
+                        session.add(result)
+                        session.commit()
+                    return result
+                else:
+                    return {
+                        'row_number': record['row_number'],
+                        'source_url': record['url'],
+                        'status': 'failed',
+                        'error_message': str(e),
+                        'processing_time_seconds': time.time() - start_time
+                    }
     
     async def _download_pdf(
         self,
@@ -434,20 +547,16 @@ class CSVBatchImporter:
     async def _update_job_progress(self, job_id: int) -> None:
         """Update job progress statistics."""
         
-        with get_db_session() as session:
-            job = session.query(BatchImportJob).filter(BatchImportJob.id == job_id).first()
+        if not (self._db_enabled and get_db_session and BatchImportJob and BatchImportResult):
+            return
+        with get_db_session() as session:  # type: ignore[arg-type]
+            job = session.query(BatchImportJob).filter(BatchImportJob.id == job_id).first()  # type: ignore[call-arg]
             if not job:
                 return
-            
-            # Count results
-            results = session.query(BatchImportResult).filter(
-                BatchImportResult.job_id == job_id
-            ).all()
-            
+            results = session.query(BatchImportResult).filter(BatchImportResult.job_id == job_id).all()  # type: ignore[call-arg]
             job.processed_items = len(results)
-            job.successful_items = len([r for r in results if r.status == 'success'])
-            job.failed_items = len([r for r in results if r.status == 'failed'])
-            
+            job.successful_items = len([r for r in results if getattr(r, 'status', '') == 'success'])
+            job.failed_items = len([r for r in results if getattr(r, 'status', '') == 'failed'])
             session.commit()
     
     def _is_valid_url(self, url: str) -> bool:
@@ -494,7 +603,7 @@ class CSVBatchImporter:
 
 # Utility functions for common CSV batch import scenarios
 
-async def import_fwc_search_results(csv_file_path: str, job_name: str = None) -> BatchImportJob:
+async def import_fwc_search_results(csv_file_path: str, job_name: str = None) -> Any:
     """
     Import Enterprise Agreements from FWC search results CSV.
     
@@ -514,7 +623,7 @@ async def import_fwc_search_results(csv_file_path: str, job_name: str = None) ->
     )
 
 
-async def import_url_list(urls: List[str], job_name: str = None) -> BatchImportJob:
+async def import_url_list(urls: List[str], job_name: str = None) -> Any:
     """
     Import Enterprise Agreements from a list of URLs.
     
