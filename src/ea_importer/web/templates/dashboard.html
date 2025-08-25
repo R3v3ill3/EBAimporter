@@ -14,6 +14,18 @@
     </div>
 </div>
 
+{% if db_error %}
+<div class="alert alert-danger" role="alert">
+    <i class="fas fa-database me-2"></i>
+    Database connection error: {{ db_error }}
+    <div class="mt-1"><small>The UI is running in degraded mode. Check database connectivity.</small></div>
+    <div class="mt-2">
+        <a href="/api/health" class="btn btn-sm btn-outline-light">Health Check</a>
+    </div>
+    
+</div>
+{% endif %}
+
 <!-- System Statistics Cards -->
 <div class="row">
     <div class="col-md-3 mb-4">
@@ -226,7 +238,13 @@
                     <div class="col-md-4">
                         <h6>System Resources</h6>
                         <ul class="list-unstyled">
-                            <li><i class="fas fa-database text-primary me-2"></i>Database: Connected</li>
+                            <li>
+                                {% if db_error %}
+                                <i class="fas fa-database text-danger me-2"></i>Database: Disconnected
+                                {% else %}
+                                <i class="fas fa-database text-primary me-2"></i>Database: Connected
+                                {% endif %}
+                            </li>
                             <li><i class="fas fa-server text-success me-2"></i>Processing: Online</li>
                             <li><i class="fas fa-hdd text-info me-2"></i>Storage: 2.3GB used</li>
                         </ul>

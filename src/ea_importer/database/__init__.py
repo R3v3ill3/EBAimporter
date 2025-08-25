@@ -6,9 +6,11 @@ Handles PostgreSQL connections, sessions, and database operations.
 from contextlib import contextmanager
 from typing import Generator, Optional, Type, TypeVar, Union
 import logging
+import socket
 
 from sqlalchemy import create_engine, MetaData, inspect
 from sqlalchemy.engine import Engine
+from sqlalchemy.engine.url import make_url
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.pool import StaticPool
 
@@ -41,7 +43,39 @@ class DatabaseManager:
     def initialize(self) -> None:
         """Initialize database engine and session factory."""
         logger.info(f"Initializing database connection to {self._safe_url()}")
-        
+
+        # Build connection args (SSL, timeouts, keepalive)
+        connect_args: dict = {
+            "connect_timeout": self.settings.database.connect_timeout,
+        }
+
+        # TCP keepalives (libpq/psycopg2)
+        if self.settings.database.keepalives:
+            connect_args.update({
+                "keepalives": 1,
+                "keepalives_idle": self.settings.database.keepalives_idle,
+                "keepalives_interval": self.settings.database.keepalives_interval,
+                "keepalives_count": self.settings.database.keepalives_count,
+            })
+        else:
+            connect_args["keepalives"] = 0
+
+        # SSL mode
+        if self.settings.database.sslmode:
+            connect_args["sslmode"] = self.settings.database.sslmode
+
+        # Prefer IPv4: resolve host and supply hostaddr (libpq uses host for SNI)
+        try:
+            if self.settings.database.prefer_ipv4:
+                url = make_url(self.database_url)
+                if url.host:
+                    infos = socket.getaddrinfo(url.host, url.port or 5432, family=socket.AF_INET, type=socket.SOCK_STREAM)
+                    if infos:
+                        ipv4_addr = infos[0][4][0]
+                        connect_args["hostaddr"] = ipv4_addr
+        except Exception as e:
+            logger.warning(f"IPv4 resolution failed; proceeding without hostaddr: {e}")
+
         # Create engine with connection pooling
         self.engine = create_engine(
             self.database_url,
@@ -49,6 +83,8 @@ class DatabaseManager:
             pool_size=self.settings.database.pool_size,
             max_overflow=self.settings.database.max_overflow,
             pool_pre_ping=True,  # Verify connections before use
+            pool_recycle=self.settings.database.pool_recycle,
+            connect_args=connect_args,
         )
         
         # Create session factory

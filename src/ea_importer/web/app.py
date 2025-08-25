@@ -118,12 +118,30 @@ async def dashboard(request: Request):
             "stats": stats,
             "recent_docs": recent_docs,
             "recent_families": recent_families,
+            "db_error": None,
             "page_title": "EA Importer Dashboard"
         })
         
     except Exception as e:
         logger.error(f"Error loading dashboard: {e}")
-        raise HTTPException(status_code=500, detail="Failed to load dashboard")
+        # Degraded mode: render dashboard with placeholders
+        empty_stats = {
+            'documents': 0,
+            'clauses': 0,
+            'fingerprints': 0,
+            'cluster_candidates': 0,
+            'families': 0,
+            'instances': 0,
+            'overlays': 0
+        }
+        return templates.TemplateResponse("dashboard.html", {
+            "request": request,
+            "stats": empty_stats,
+            "recent_docs": [],
+            "recent_families": [],
+            "db_error": str(e),
+            "page_title": "EA Importer Dashboard"
+        })
 
 
 @app.get("/documents", response_class=HTMLResponse)
@@ -257,11 +275,14 @@ async def health_check():
         
     except Exception as e:
         logger.error(f"Health check failed: {e}")
-        return {
-            "status": "unhealthy",
-            "timestamp": datetime.utcnow().isoformat(),
-            "error": str(e)
-        }, 503
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "unhealthy",
+                "timestamp": datetime.utcnow().isoformat(),
+                "error": str(e)
+            }
+        )
 
 
 @app.get("/api/stats")
