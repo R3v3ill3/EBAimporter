@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+
+{% block title %}Document Detail{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
+    <h1 class="h2"><i class="fas fa-file-pdf me-2"></i>{{ document.file_name }}</h1>
+    <div class="btn-toolbar mb-2 mb-md-0">
+        <a href="/documents" class="btn btn-sm btn-outline-secondary">Back to List</a>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-md-8">
+        <div class="card mb-3">
+            <div class="card-header">Clauses</div>
+            <div class="card-body">
+                {% if clauses %}
+                <ul class="list-group list-group-flush">
+                    {% for clause in clauses %}
+                    <li class="list-group-item">
+                        <div class="fw-bold">Clause {{ clause.clause_number }}: {{ clause.heading }}</div>
+                        <div class="text-muted small">{{ clause.text[:300] }}{% if clause.text|length > 300 %}...{% endif %}</div>
+                    </li>
+                    {% endfor %}
+                </ul>
+                {% else %}
+                <p class="text-muted">No clauses found.</p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card mb-3">
+            <div class="card-header">Fingerprint</div>
+            <div class="card-body">
+                {% if fingerprint %}
+                <pre class="small">{{ fingerprint.fingerprint_data | tojson(indent=2) }}</pre>
+                {% else %}
+                <p class="text-muted">No fingerprint data available.</p>
+                {% endif %}
+            </div>
+        </div>
+        <div class="card">
+            <div class="card-header">Metadata</div>
+            <div class="card-body">
+                <ul class="list-unstyled">
+                    <li><strong>ID:</strong> {{ document.id }}</li>
+                    <li><strong>Status:</strong> {{ document.status }}</li>
+                    <li><strong>Created:</strong> {{ document.created_at.strftime('%Y-%m-%d %H:%M') if document.created_at }}</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+

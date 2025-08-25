@@ -22,7 +22,7 @@ from ...pipeline.family_builder import FamilyBuilder
 logger = get_logger(__name__)
 
 router = APIRouter()
-templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent.parent / "templates"))
 
 
 @router.get("/", response_class=HTMLResponse)

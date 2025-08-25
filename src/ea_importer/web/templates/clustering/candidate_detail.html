@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+
+{% block title %}Cluster Candidate{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
+    <h1 class="h2"><i class="fas fa-project-diagram me-2"></i>Candidate #{{ candidate.id }}</h1>
+    <div class="btn-toolbar mb-2 mb-md-0">
+        <a href="/clustering" class="btn btn-sm btn-outline-secondary">Back</a>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-md-8">
+        <div class="card mb-3">
+            <div class="card-header">Documents</div>
+            <div class="card-body">
+                {% if documents %}
+                <ul class="list-group list-group-flush">
+                    {% for doc in documents %}
+                    <li class="list-group-item d-flex justify-content-between align-items-center">
+                        <span>{{ doc.file_name }}</span>
+                        <a href="/documents/{{ doc.id }}" class="btn btn-sm btn-outline-primary">Open</a>
+                    </li>
+                    {% endfor %}
+                </ul>
+                {% else %}
+                <p class="text-muted">No documents.</p>
+                {% endif %}
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">Sample Clauses</div>
+            <div class="card-body">
+                {% if sample_clauses %}
+                {% for doc_id, clauses in sample_clauses.items() %}
+                <h6>Document {{ doc_id }}</h6>
+                <ul class="list-group list-group-flush mb-3">
+                    {% for clause in clauses %}
+                    <li class="list-group-item">
+                        <div class="fw-bold">Clause {{ clause.clause_number }}: {{ clause.heading }}</div>
+                        <div class="small text-muted">{{ clause.text[:250] }}{% if clause.text|length > 250 %}...{% endif %}</div>
+                    </li>
+                    {% endfor %}
+                </ul>
+                {% endfor %}
+                {% else %}
+                <p class="text-muted">No sample clauses.</p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card">
+            <div class="card-header">Similarity</div>
+            <div class="card-body">
+                {% if similarity_matrix %}
+                <pre class="small">{{ similarity_matrix | tojson(indent=2) }}</pre>
+                {% else %}
+                <p class="text-muted">No similarity data.</p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
