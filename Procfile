@@ -1,0 +1,1 @@
+web: PYTHONPATH=src uvicorn ea_importer.web.app:app --host 0.0.0.0 --port ${PORT:-8080}
