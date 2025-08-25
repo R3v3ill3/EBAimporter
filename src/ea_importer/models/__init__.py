@@ -84,6 +84,7 @@ class Document(Base):
     ingest_run_id = Column(Integer, ForeignKey("ingest_runs.id"))
     processed_at = Column(DateTime, default=func.now())
     status = Column(String(20), default=ProcessingStatus.PENDING.value)
+    created_at = Column(DateTime, default=func.now())
     
     # Document metadata
     total_pages = Column(Integer)
@@ -104,6 +105,11 @@ class Document(Base):
     fingerprints = relationship("DocumentFingerprint", back_populates="document", cascade="all, delete-orphan")
     family_memberships = relationship("FamilyMember", back_populates="document")
 
+    # Backwards compatible attribute used by web layer
+    @property
+    def file_name(self) -> Optional[str]:
+        return self.original_filename
+
 
 class Clause(Base):
     """Individual clause within a document"""
@@ -112,6 +118,7 @@ class Clause(Base):
     id = Column(Integer, primary_key=True)
     document_id = Column(Integer, ForeignKey("documents.id"), nullable=False)
     clause_id = Column(String(50), nullable=False)  # e.g., "2.3.1.a"
+    clause_number = Column(String(50))  # For UI ordering compatibility
     heading = Column(String(500))
     text = Column(Text, nullable=False)
     
@@ -166,6 +173,7 @@ class AgreementFamily(Base):
     
     id = Column(Integer, primary_key=True)
     title = Column(String(500), nullable=False)
+    family_name = Column(String(255))
     jurisdiction = Column(String(100))
     version = Column(String(50))
     
@@ -178,6 +186,12 @@ class AgreementFamily(Base):
     checksum = Column(String(64))
     created_at = Column(DateTime, default=func.now())
     locked_at = Column(DateTime)
+    updated_at = Column(DateTime)
+    # Web UI fields
+    document_ids = Column(JSON)
+    gold_text = Column(JSON)
+    similarity_stats = Column(JSON)
+    quality_score = Column(Float)
     
     # Relationships
     gold_document = relationship("Document", foreign_keys=[gold_document_id])
@@ -350,6 +364,8 @@ class InstanceOverlay(Base):
     
     id = Column(Integer, primary_key=True)
     instance_id = Column(Integer, ForeignKey("agreement_instances.id"), nullable=False)
+    # Optional link to family for UI queries
+    family_id = Column(Integer, ForeignKey("agreement_families.id"))
     clause_id = Column(String(50), nullable=False)
     
     overlay_type = Column(String(20), nullable=False)  # OverlayType enum
@@ -384,6 +400,52 @@ class ClusteringRun(Base):
     started_at = Column(DateTime, default=func.now())
     completed_at = Column(DateTime)
     status = Column(String(20), default=ProcessingStatus.PENDING.value)
+
+
+# ---------------------------------------------------------------------------
+# Backwards-compatible alias names expected by web layer
+# ---------------------------------------------------------------------------
+
+# Provide legacy-style aliases for ORM classes so imports like
+# `from ea_importer.models import DocumentDB, ClauseDB, FingerprintDB, ...`
+# resolve correctly in the web app and routes.
+DocumentDB = Document
+ClauseDB = Clause
+FingerprintDB = DocumentFingerprint
+FamilyDB = AgreementFamily
+InstanceDB = AgreementInstance
+OverlayDB = InstanceOverlay
+
+
+# ---------------------------------------------------------------------------
+# Additional web-layer expectations
+# ---------------------------------------------------------------------------
+
+class ClusterConfidence(str, Enum):
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
+class ClusterCandidateDB(Base):
+    """Persisted cluster candidate for review in the web UI.
+
+    This provides minimal fields used by the web routes for listing, sorting,
+    and reviewing candidates. It is intentionally simple and can be extended
+    later if needed.
+    """
+    __tablename__ = "cluster_candidates"
+
+    id = Column(Integer, primary_key=True)
+    # Store referenced document IDs as JSON array of integers
+    document_ids = Column(JSON, nullable=False, default=list)
+    # Confidence score used for ordering in UI
+    confidence_score = Column(Float, default=0.0)
+    # Review workflow
+    review_status = Column(String(20), default="pending")  # pending/approved/rejected
+    review_notes = Column(Text)
+    reviewed_at = Column(DateTime)
+    created_at = Column(DateTime, default=func.now())
 
 
 # ============================================================================
