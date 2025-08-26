@@ -116,7 +116,8 @@ class DatabaseManager:
         self.SessionLocal = sessionmaker(
             autocommit=False,
             autoflush=False,
-            bind=self.engine
+            bind=self.engine,
+            expire_on_commit=False,
         )
         
         logger.info("Database connection initialized successfully")
