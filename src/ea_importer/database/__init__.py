@@ -8,6 +8,7 @@ from typing import Generator, Optional, Type, TypeVar, Union
 import logging
 import socket
 import re
+import os
 
 from sqlalchemy import create_engine, MetaData, inspect
 from sqlalchemy.engine import Engine
@@ -65,6 +66,9 @@ class DatabaseManager:
         if self.settings.database.sslmode:
             connect_args["sslmode"] = self.settings.database.sslmode
 
+        # Track a chosen IPv4 address if we find one
+        chosen_ipv4: Optional[str] = None
+
         # Optional hostaddr override (forces IPv4 if provided)
         if getattr(self.settings.database, "hostaddr", None):
             raw_hostaddr = str(self.settings.database.hostaddr).strip()
@@ -74,6 +78,7 @@ class DatabaseManager:
             ipv4_pattern = re.compile(r"^(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})\.(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})\.(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})\.(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})$")
             if cleaned_hostaddr and ipv4_pattern.match(cleaned_hostaddr):
                 connect_args["hostaddr"] = cleaned_hostaddr
+                chosen_ipv4 = cleaned_hostaddr
                 logger.info(f"Using DB_HOSTADDR override: {cleaned_hostaddr}")
             else:
                 logger.warning(
@@ -89,9 +94,35 @@ class DatabaseManager:
                     if infos:
                         ipv4_addr = infos[0][4][0]
                         connect_args["hostaddr"] = ipv4_addr
+                        chosen_ipv4 = ipv4_addr
                         logger.info(f"Using resolved IPv4 hostaddr: {ipv4_addr}")
         except Exception as e:
             logger.warning(f"IPv4 resolution failed; proceeding without hostaddr: {e}")
+
+        # If we have a chosen IPv4, apply it via env and DSN query to maximize enforcement
+        if chosen_ipv4:
+            try:
+                # Ensure libpq honors IPv4 by environment as well
+                os.environ["PGHOSTADDR"] = chosen_ipv4
+                # Also inject hostaddr and sslmode into the URL query params
+                url = make_url(self.database_url)
+                # Merge/override query parameters
+                new_query = dict(url.query or {})
+                new_query["hostaddr"] = chosen_ipv4
+                if self.settings.database.sslmode:
+                    new_query["sslmode"] = self.settings.database.sslmode
+                if self.settings.database.connect_timeout:
+                    new_query["connect_timeout"] = str(self.settings.database.connect_timeout)
+                # Rebuild URL string including password (we mask separately in logs)
+                try:
+                    # SQLAlchemy 1.4/2.0 provide render_as_string
+                    self.database_url = url.set(query=new_query).render_as_string(hide_password=False)  # type: ignore[attr-defined]
+                except Exception:
+                    # Fallback for older SQLAlchemy: coerce to string
+                    self.database_url = str(url.set(query=new_query))
+                logger.info("Applied IPv4 hostaddr via PGHOSTADDR and DSN query parameters")
+            except Exception as e:
+                logger.warning(f"Failed to inject hostaddr into environment/URL: {e}")
 
         # Mask and log connect args for diagnostics (exclude secrets)
         def _mask_args(args: dict) -> dict:
