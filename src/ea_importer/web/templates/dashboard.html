@@ -200,38 +200,39 @@
 <div class="row mt-4">
     <div class="col-12">
         <div class="card">
-            <div class="card-header">
+            <div class="card-header d-flex justify-content-between align-items-center">
                 <h5 class="card-title mb-0">
                     <i class="fas fa-info-circle me-2"></i>System Status
                 </h5>
+                <div>
+                    <a href="/api/health" class="btn btn-sm btn-outline-secondary" target="_blank">
+                        API Health
+                    </a>
+                    <a href="/api/stats" class="btn btn-sm btn-outline-secondary" target="_blank">
+                        API Stats
+                    </a>
+                </div>
             </div>
             <div class="card-body">
                 <div class="row">
                     <div class="col-md-4">
                         <h6>Processing Pipeline</h6>
-                        <div class="progress mb-2">
-                            <div class="progress-bar bg-success" role="progressbar" style="width: 85%">
-                                PDF Processing: 85%
-                            </div>
-                        </div>
-                        <div class="progress mb-2">
-                            <div class="progress-bar bg-info" role="progressbar" style="width: 70%">
-                                Clustering: 70%
-                            </div>
-                        </div>
-                        <div class="progress mb-2">
-                            <div class="progress-bar bg-warning" role="progressbar" style="width: 45%">
-                                Family Building: 45%
-                            </div>
-                        </div>
+                        <ul class="list-unstyled mb-0">
+                            <li>
+                                <i class="fas fa-file-import text-primary me-2"></i>
+                                Upload directory: <code>{{ upload_dir }}</code>
+                            </li>
+                            <li>
+                                <i class="fas fa-file text-muted me-2"></i>
+                                Uploaded files: {{ upload_file_count }}
+                            </li>
+                        </ul>
                     </div>
                     
                     <div class="col-md-4">
                         <h6>Quality Metrics</h6>
                         <ul class="list-unstyled">
-                            <li><i class="fas fa-check text-success me-2"></i>OCR Success Rate: 98.5%</li>
-                            <li><i class="fas fa-check text-success me-2"></i>Segmentation Quality: 96.2%</li>
-                            <li><i class="fas fa-exclamation-triangle text-warning me-2"></i>Clustering Accuracy: 87.3%</li>
+                            <li class="text-muted"><em>Live metrics coming soon</em></li>
                         </ul>
                     </div>
                     
@@ -245,8 +246,10 @@
                                 <i class="fas fa-database text-primary me-2"></i>Database: Connected
                                 {% endif %}
                             </li>
-                            <li><i class="fas fa-server text-success me-2"></i>Processing: Online</li>
-                            <li><i class="fas fa-hdd text-info me-2"></i>Storage: 2.3GB used</li>
+                            <li>
+                                <i class="fas fa-hdd text-info me-2"></i>
+                                Storage used ({{ upload_dir | default('uploads') | replace(upload_dir, 'data') if upload_dir else 'data' }}): {{ storage_pretty }}
+                            </li>
                         </ul>
                     </div>
                 </div>

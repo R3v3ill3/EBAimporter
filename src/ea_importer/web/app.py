@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.background import BackgroundTasks
 import uvicorn
 from typing import List, Dict, Any, Optional
 import json
@@ -30,6 +31,8 @@ from ..models import (
     DocumentDB, ClauseDB, FingerprintDB, 
     ClusterCandidateDB, FamilyDB, InstanceDB, OverlayDB
 )
+from ..utils.pdf_processor import PDFProcessor
+from ..utils.fingerprinter import Fingerprinter
 from .routes import (
     clustering_router, 
     family_router, 
@@ -88,10 +91,34 @@ app.include_router(qa_router, prefix="/qa", tags=["qa"])
 app.include_router(monitoring_router, prefix="/monitoring", tags=["monitoring"])
 
 
+def _format_bytes(num_bytes: int) -> str:
+    # Human readable file size
+    for unit in ["B", "KB", "MB", "GB", "TB"]:
+        if num_bytes < 1024.0:
+            return f"{num_bytes:.1f} {unit}"
+        num_bytes /= 1024.0
+    return f"{num_bytes:.1f} PB"
+
+
+def _dir_size_bytes(path: Path) -> int:
+    try:
+        if not path.exists():
+            return 0
+        total = 0
+        for p in path.rglob("*"):
+            if p.is_file():
+                try:
+                    total += p.stat().st_size
+                except Exception:
+                    continue
+        return total
+    except Exception:
+        return 0
+
+
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
     """Main dashboard showing system overview"""
-    
     try:
         with get_db_session() as session:
             # Get system statistics
@@ -113,14 +140,25 @@ async def dashboard(request: Request):
             recent_families = session.query(FamilyDB).order_by(
                 FamilyDB.created_at.desc()
             ).limit(5).all()
-            
+        
+        # Live system data
+        settings = get_settings()
+        data_dir = Path(settings.paths.data_dir)
+        upload_dir = Path(settings.paths.upload_dir)
+        storage_bytes = _dir_size_bytes(data_dir)
+        upload_count = len([p for p in upload_dir.glob("**/*") if p.is_file()]) if upload_dir.exists() else 0
+
         return templates.TemplateResponse("dashboard.html", {
             "request": request,
             "stats": stats,
             "recent_docs": recent_docs,
             "recent_families": recent_families,
             "db_error": None,
-            "page_title": "EA Importer Dashboard"
+            "page_title": "EA Importer Dashboard",
+            "storage_bytes": storage_bytes,
+            "storage_pretty": _format_bytes(storage_bytes),
+            "upload_dir": str(upload_dir),
+            "upload_file_count": upload_count,
         })
         
     except Exception as e:
@@ -135,13 +173,20 @@ async def dashboard(request: Request):
             'instances': 0,
             'overlays': 0
         }
+        settings = get_settings()
+        data_dir = Path(settings.paths.data_dir)
+        storage_bytes = _dir_size_bytes(data_dir)
         return templates.TemplateResponse("dashboard.html", {
             "request": request,
             "stats": empty_stats,
             "recent_docs": [],
             "recent_families": [],
             "db_error": str(e),
-            "page_title": "EA Importer Dashboard"
+            "page_title": "EA Importer Dashboard",
+            "storage_bytes": storage_bytes,
+            "storage_pretty": _format_bytes(storage_bytes),
+            "upload_dir": str(Path(settings.paths.upload_dir)),
+            "upload_file_count": 0,
         })
 
 
@@ -212,50 +257,157 @@ async def document_detail(request: Request, document_id: int):
         raise HTTPException(status_code=500, detail="Failed to load document")
 
 
+def _process_uploaded_document(document_id: Optional[int], file_path: str) -> None:
+    """Background processing hook for uploaded PDFs."""
+    logger.info(f"Starting background processing for {file_path} (doc_id={document_id})")
+    settings = get_settings()
+    processor = PDFProcessor()
+    fingerprinter = Fingerprinter()
+    try:
+        pdf_doc = processor.process_pdf(Path(file_path))
+        ea_id = pdf_doc.metadata.get('ea_id')
+        # Persist updates
+        with get_db_session() as session:
+            doc: Optional[DocumentDB] = None
+            if document_id:
+                doc = session.query(DocumentDB).filter(DocumentDB.id == document_id).first()
+            if doc is None:
+                # Create if missing
+                doc = DocumentDB(
+                    ea_id=ea_id or f"EA-{Path(file_path).stem}",
+                    file_path=str(file_path),
+                    original_filename=Path(file_path).name,
+                )
+                session.add(doc)
+                session.flush()
+            # Update fields
+            try:
+                size_bytes = Path(file_path).stat().st_size
+            except Exception:
+                size_bytes = None
+            doc.ea_id = ea_id or doc.ea_id
+            doc.file_size_bytes = size_bytes
+            doc.has_text_layer = True  # heuristic; refine if needed
+            doc.ocr_used = bool(pdf_doc.metadata.get('ocr_used'))
+            doc.total_pages = pdf_doc.total_pages
+            doc.status = "completed"
+            doc.processed_at = datetime.utcnow()
+            # Fingerprint
+            try:
+                fp = fingerprinter.fingerprint_document(pdf_doc, include_embeddings=False)
+                fp_db = FingerprintDB(
+                    document_id=doc.id,
+                    minhash_signature=fp.minhash_signature,
+                    embedding_vector=None,
+                    minhash_permutations=fp.minhash_permutations,
+                    ngram_size=fp.ngram_size,
+                )
+                session.add(fp_db)
+            except Exception as fe:
+                logger.warning(f"Fingerprinting failed for {file_path}: {fe}")
+    except Exception as e:
+        logger.error(f"Background processing failed for {file_path}: {e}")
+        # Best-effort status update
+        try:
+            with get_db_session() as session:
+                if document_id:
+                    doc = session.query(DocumentDB).filter(DocumentDB.id == document_id).first()
+                    if doc:
+                        doc.status = "failed"
+        except Exception:
+            pass
+
+
 @app.post("/upload")
 async def upload_document(
     request: Request,
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     auto_process: bool = Form(False)
 ):
     """Upload a new document for processing"""
-    
     try:
         # Validate file type
         if not file.filename.lower().endswith('.pdf'):
-            raise HTTPException(status_code=400, detail="Only PDF files are supported")
+            return JSONResponse(status_code=400, content={"success": False, "message": "Only PDF files are supported"})
         
-        # Save uploaded file
         settings = get_settings()
         upload_dir = Path(settings.paths.upload_dir)
         upload_dir.mkdir(parents=True, exist_ok=True)
         
         file_path = upload_dir / file.filename
         
-        with open(file_path, "wb") as f:
-            content = await file.read()
-            f.write(content)
+        # Stream upload to disk with size guard
+        max_bytes = int(settings.processing.max_file_size_mb) * 1024 * 1024
+        bytes_written = 0
+        try:
+            with open(file_path, "wb") as out_f:
+                while True:
+                    chunk = await file.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    bytes_written += len(chunk)
+                    if bytes_written > max_bytes:
+                        try:
+                            out_f.flush()
+                        except Exception:
+                            pass
+                        try:
+                            out_f.close()
+                        except Exception:
+                            pass
+                        try:
+                            file_path.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                        return JSONResponse(status_code=400, content={
+                            "success": False,
+                            "message": f"File exceeds max size of {settings.processing.max_file_size_mb} MB"
+                        })
+                    out_f.write(chunk)
+        finally:
+            await file.close()
         
-        logger.info(f"Uploaded file: {file.filename} ({len(content)} bytes)")
+        logger.info(f"Uploaded file: {file.filename} ({bytes_written} bytes)")
         
-        # If auto_process is enabled, trigger processing
+        # Best-effort: create document record if DB is available
+        created_document_id: Optional[int] = None
+        try:
+            with get_db_session() as session:
+                doc = DocumentDB(
+                    ea_id=f"PENDING-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}",
+                    file_path=str(file_path),
+                    original_filename=file.filename,
+                    file_size_bytes=bytes_written,
+                    status="pending",
+                )
+                session.add(doc)
+                session.flush()
+                created_document_id = doc.id
+        except Exception as db_e:
+            logger.warning(f"Upload DB record creation skipped due to error: {db_e}")
+        
+        # If auto_process is enabled, trigger processing (stub/hook)
         if auto_process:
-            # This would typically be an async task
-            # For now, we'll just return the upload confirmation
-            pass
+            background_tasks.add_task(_process_uploaded_document, created_document_id, str(file_path))
         
         return JSONResponse({
             "success": True,
             "message": f"File {file.filename} uploaded successfully",
             "file_path": str(file_path),
-            "auto_process": auto_process
+            "file_size_bytes": bytes_written,
+            "auto_process": auto_process,
+            "document_id": created_document_id,
         })
         
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error(f"Error uploading file: {e}")
-        raise HTTPException(status_code=500, detail="Failed to upload file")
+        # Return JSON to avoid HTML error handler for XHR
+        return JSONResponse(status_code=500, content={
+            "success": False,
+            "message": "Failed to upload file",
+            "error": str(e)
+        })
 
 
 @app.get("/api/health")
@@ -310,6 +462,46 @@ async def get_stats():
         raise HTTPException(status_code=500, detail="Failed to get statistics")
 
 
+@app.get("/api/system")
+async def get_system_status():
+    """Return system-level health and resource information."""
+    settings = get_settings()
+    data_dir = Path(settings.paths.data_dir)
+    upload_dir = Path(settings.paths.upload_dir)
+
+    # DB health
+    db_ok = False
+    db_error: Optional[str] = None
+    try:
+        with get_db_session() as session:
+            session.execute(text("SELECT 1"))
+            db_ok = True
+    except Exception as e:
+        db_error = str(e)
+
+    storage_bytes = _dir_size_bytes(data_dir)
+    upload_files = 0
+    if upload_dir.exists():
+        upload_files = len([p for p in upload_dir.glob("**/*") if p.is_file()])
+
+    return {
+        "timestamp": datetime.utcnow().isoformat(),
+        "version": "1.0.0",
+        "database": {
+            "connected": db_ok,
+            "error": db_error,
+        },
+        "storage": {
+            "data_dir": str(data_dir),
+            "bytes_used": storage_bytes,
+            "pretty": _format_bytes(storage_bytes),
+        },
+        "uploads": {
+            "path": str(upload_dir),
+            "file_count": upload_files,
+        },
+    }
+
 # Error handlers
 @app.exception_handler(404)
 async def not_found_handler(request: Request, exc: HTTPException):
@@ -324,6 +516,13 @@ async def not_found_handler(request: Request, exc: HTTPException):
 @app.exception_handler(500)
 async def server_error_handler(request: Request, exc: HTTPException):
     """Custom 500 error handler"""
+    # If the request likely expects JSON (e.g., XHR), return JSON
+    try:
+        accept = request.headers.get("accept", "")
+        if "application/json" in accept:
+            return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
+    except Exception:
+        pass
     return templates.TemplateResponse(
         "errors/500.html",
         {"request": request, "page_title": "Server Error"},
