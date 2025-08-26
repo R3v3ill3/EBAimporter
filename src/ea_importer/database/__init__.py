@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from typing import Generator, Optional, Type, TypeVar, Union
 import logging
 import socket
+import re
 
 from sqlalchemy import create_engine, MetaData, inspect
 from sqlalchemy.engine import Engine
@@ -66,7 +67,15 @@ class DatabaseManager:
 
         # Optional hostaddr override (forces IPv4 if provided)
         if getattr(self.settings.database, "hostaddr", None):
-            connect_args["hostaddr"] = self.settings.database.hostaddr
+            raw_hostaddr = str(self.settings.database.hostaddr).strip()
+            # Sanitize: keep only digits and dots; reject if anything else appears
+            cleaned_hostaddr = re.sub(r"[^0-9\.]", "", raw_hostaddr)
+            if cleaned_hostaddr and cleaned_hostaddr.count(".") >= 1:
+                connect_args["hostaddr"] = cleaned_hostaddr
+            else:
+                logger.warning(
+                    f"Ignoring invalid DB_HOSTADDR value: '{raw_hostaddr}'. Expected IPv4 like '1.2.3.4'"
+                )
 
         # Prefer IPv4: resolve host and supply hostaddr (libpq uses host for SNI)
         try:
@@ -79,6 +88,14 @@ class DatabaseManager:
                         connect_args["hostaddr"] = ipv4_addr
         except Exception as e:
             logger.warning(f"IPv4 resolution failed; proceeding without hostaddr: {e}")
+
+        # Mask and log connect args for diagnostics (exclude secrets)
+        def _mask_args(args: dict) -> dict:
+            masked = dict(args)
+            # These keys are not expected to contain secrets; keep as-is
+            return masked
+
+        logger.info(f"Database connect args: {_mask_args(connect_args)}")
 
         # Create engine with connection pooling
         self.engine = create_engine(
