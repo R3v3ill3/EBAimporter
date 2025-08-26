@@ -35,7 +35,10 @@
             <div class="card-header">Fingerprint</div>
             <div class="card-body">
                 {% if fingerprint %}
-                <pre class="small">{{ fingerprint.fingerprint_data | tojson(indent=2) }}</pre>
+                <ul class="list-unstyled small">
+                    <li><strong>Permutations:</strong> {{ fingerprint.minhash_permutations }}</li>
+                    <li><strong>N-gram size:</strong> {{ fingerprint.ngram_size }}</li>
+                </ul>
                 {% else %}
                 <p class="text-muted">No fingerprint data available.</p>
                 {% endif %}
@@ -47,11 +50,34 @@
                 <ul class="list-unstyled">
                     <li><strong>ID:</strong> {{ document.id }}</li>
                     <li><strong>Status:</strong> {{ document.status }}</li>
+                    <li><strong>Pages:</strong> {{ document.total_pages or '—' }}</li>
+                    <li><strong>Clauses:</strong> {{ document.total_clauses or 0 }}</li>
                     <li><strong>Created:</strong> {{ document.created_at.strftime('%Y-%m-%d %H:%M') if document.created_at }}</li>
                 </ul>
+                <div class="d-grid gap-2">
+                    <form method="post" action="/documents/{{ document.id }}/process" onsubmit="return triggerProcess(event)">
+                        <button type="submit" class="btn btn-sm btn-outline-primary">Process / Reprocess</button>
+                    </form>
+                </div>
             </div>
         </div>
     </div>
 </div>
 {% endblock %}
 
+{% block extra_js %}
+<script>
+async function triggerProcess(e) {
+    e.preventDefault();
+    try {
+        const res = await fetch(e.target.action, { method: 'POST' });
+        if (!res.ok) { alert('Failed to start processing'); return false; }
+        alert('Processing started');
+        location.reload();
+    } catch (err) {
+        alert('Error: ' + err);
+    }
+    return false;
+}
+</script>
+{% endblock %}
