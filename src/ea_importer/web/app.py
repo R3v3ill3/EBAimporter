@@ -21,6 +21,7 @@ import json
 import logging
 from pathlib import Path
 from datetime import datetime
+from sqlalchemy import text
 
 from ..core.config import get_settings
 from ..core.logging import get_logger
@@ -264,7 +265,7 @@ async def health_check():
     try:
         # Test database connection
         with get_db_session() as session:
-            session.execute("SELECT 1")
+            session.execute(text("SELECT 1"))
         
         return {
             "status": "healthy",

@@ -64,9 +64,13 @@ class DatabaseManager:
         if self.settings.database.sslmode:
             connect_args["sslmode"] = self.settings.database.sslmode
 
+        # Optional hostaddr override (forces IPv4 if provided)
+        if getattr(self.settings.database, "hostaddr", None):
+            connect_args["hostaddr"] = self.settings.database.hostaddr
+
         # Prefer IPv4: resolve host and supply hostaddr (libpq uses host for SNI)
         try:
-            if self.settings.database.prefer_ipv4:
+            if self.settings.database.prefer_ipv4 and "hostaddr" not in connect_args:
                 url = make_url(self.database_url)
                 if url.host:
                     infos = socket.getaddrinfo(url.host, url.port or 5432, family=socket.AF_INET, type=socket.SOCK_STREAM)

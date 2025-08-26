@@ -13,6 +13,7 @@ Set these in Railway project settings (Variables):
 - DB_CONNECT_TIMEOUT: `10` (optional)
 - DB_POOL_SIZE: `5` (recommended for small instances)
 - DB_MAX_OVERFLOW: `5`
+- DB_HOSTADDR: optional IPv4 literal for the DB host (e.g. `1.2.3.4`). If set, the app will connect to this address directly while keeping the hostname for TLS SNI via libpq's `host` field.
 
 The `Procfile` already binds Uvicorn to `0.0.0.0` and uses `PORT`, so no extra web vars are required.
 
@@ -31,7 +32,7 @@ From a local machine (or any environment with psql):
 psql "sslmode=require host=db.<ref>.supabase.co port=5432 dbname=postgres user=<user> password=<password>"
 ```
 
-If this works locally but fails on Railway with IPv6 addresses in logs, ensure `DB_PREFER_IPV4=true` is set.
+If this works locally but fails on Railway with IPv6 addresses in logs, ensure `DB_PREFER_IPV4=true` is set. If DNS still resolves to IPv6 only from within the container, set `DB_HOSTADDR` to the IPv4 address of your Supabase DB (you can resolve it locally: `dig +short A db.<ref>.supabase.co`).
 
 ### 4) Runtime behavior
 
