@@ -1,4 +1,124 @@
 """
+Rates & Rules extractor for EA Importer.
+
+Provides minimal, regex-driven extraction of:
+- Wage rates found in schedules or bullet lists
+- Simple rule patterns (overtime multipliers, allowances)
+
+This module is intentionally pragmatic: it gives the CLI and tests a
+functioning implementation that can be iterated upon with better table
+parsing and NLP later.
+"""
+
+from __future__ import annotations
+
+import re
+from typing import List, Dict, Any, Optional
+from dataclasses import dataclass
+
+from ..core.logging import get_logger, log_function_call
+from ..models import RateExtraction, RuleExtraction
+
+
+logger = get_logger(__name__)
+
+
+_RATE_LINE = re.compile(
+    r"^(?:Level\s*(?P<level>[A-Za-z0-9\.\- ]+?)\s*[:\-]\s*)?\$?(?P<amount>\d{2,3,4,5}[\.,]?\d{0,2})\s*(?:per\s*(?P<unit>hour|week|day|annum|year))?",
+    re.IGNORECASE,
+)
+
+_ALLOWED_CLASSIFICATION = re.compile(r"^Level\s*\d+|Classification|Grade|Band", re.IGNORECASE)
+
+_OVERTIME_RULE = re.compile(r"overtime.*?(?:x|times|multiplier)\s*(?P<mult>1\.?\d*)", re.IGNORECASE)
+_ALLOWANCE_RULE = re.compile(r"(?P<name>tool|meal|travel)\s*allowance.*?\$?(?P<amt>\d{1,4}(?:[\.,]\d{2})?)", re.IGNORECASE)
+
+
+@dataclass
+class ExtractionConfig:
+    default_rate_unit: str = "weekly"
+
+
+class RatesRulesExtractor:
+    """Lightweight extractor for rates and simple rules."""
+
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        self.config = ExtractionConfig(**(config or {}))
+
+    @log_function_call
+    def extract_rates(self, text: str) -> List[RateExtraction]:
+        rates: List[RateExtraction] = []
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            m = _RATE_LINE.search(line)
+            if not m:
+                continue
+            try:
+                amount_str = m.group("amount").replace(",", "").replace(" ", "")
+                amount = float(amount_str)
+            except Exception:
+                continue
+            level = (m.group("level") or "").strip()
+            unit = (m.group("unit") or self.config.default_rate_unit).lower()
+            classification = level if level else "Classification"
+            if not _ALLOWED_CLASSIFICATION.search(classification):
+                classification = f"Level {classification}" if classification else "Level"
+            rates.append(
+                RateExtraction(
+                    classification=classification,
+                    level=None,
+                    base_rate=amount,
+                    unit="hourly" if unit.startswith("hour") else ("weekly" if unit.startswith("week") else ("annual" if unit.startswith("ann") or unit.startswith("year") else self.config.default_rate_unit)),
+                    source_clause_id="",
+                )
+            )
+        logger.info(f"Extracted {len(rates)} candidate rates")
+        return rates
+
+    @log_function_call
+    def extract_rules(self, text: str) -> List[RuleExtraction]:
+        rules: List[RuleExtraction] = []
+
+        # Overtime multipliers
+        for m in _OVERTIME_RULE.finditer(text):
+            try:
+                mult = float(m.group("mult"))
+            except Exception:
+                mult = 1.5
+            rules.append(
+                RuleExtraction(
+                    key="overtime",
+                    rule_type="overtime",
+                    rule_data={"multiplier": mult},
+                    source_clause_id="",
+                )
+            )
+
+        # Common allowances
+        for m in _ALLOWANCE_RULE.finditer(text):
+            name = m.group("name").lower()
+            try:
+                amt = float(m.group("amt").replace(",", ""))
+            except Exception:
+                continue
+            rules.append(
+                RuleExtraction(
+                    key=f"{name}_allowance",
+                    rule_type="allowance",
+                    rule_data={"amount": amt, "name": name},
+                    source_clause_id="",
+                )
+            )
+
+        logger.info(f"Extracted {len(rules)} simple rules")
+        return rules
+
+
+__all__ = ["RatesRulesExtractor", "ExtractionConfig"]
+
+"""
 Rates and Rules Extractor for EA Importer.
 Extracts structured data from Enterprise Agreement clauses.
 """

@@ -1,4 +1,147 @@
 """
+QA Calculator for EA Importer.
+
+Provides synthetic worker generation and a simple rules-based smoke test
+runner to validate rates/rules consistency at a basic level.
+"""
+
+from __future__ import annotations
+
+import random
+from typing import List, Dict, Any
+from dataclasses import dataclass
+from datetime import datetime
+
+from ..core.logging import get_logger, log_function_call
+from ..models import QATestResult
+
+
+logger = get_logger(__name__)
+
+
+@dataclass
+class WorkerScenario:
+    worker_id: str
+    classification: str
+    hours: float
+    day: str
+
+
+class QACalculator:
+    """Minimal QA utility: synthetic workers and smoke tests."""
+
+    @log_function_call
+    def generate_synthetic_workers(self, family_id: str, count: int = 20) -> List[Dict[str, Any]]:
+        workers: List[Dict[str, Any]] = []
+        for i in range(count):
+            workers.append(
+                {
+                    "worker_id": f"W{i+1:03d}",
+                    "classification": random.choice([
+                        "Level 1", "Level 2", "Level 3", "Level 4"
+                    ]),
+                    "hours": random.choice([7.6, 8.0, 9.5]),
+                    "day": random.choice(["weekday", "saturday", "sunday"]) ,
+                }
+            )
+        return workers
+
+    @log_function_call
+    def run_smoke_tests(
+        self,
+        family_id: str,
+        family_rates: List[Dict[str, Any]],
+        family_rules: List[Dict[str, Any]],
+        synthetic_workers: List[Dict[str, Any]],
+    ) -> List[QATestResult]:
+        # Build simple rate lookup
+        rate_map: Dict[str, float] = {}
+        for r in family_rates:
+            key = (r.get("classification") or "").strip()
+            if not key:
+                continue
+            base = float(r.get("base_rate", 0.0))
+            unit = (r.get("unit") or "hourly").lower()
+            # Normalize to hourly for simple calc
+            if unit == "weekly":
+                base = base / 38.0
+            elif unit == "annual":
+                base = base / (52.0 * 38.0)
+            rate_map[key.lower()] = base
+
+        overtime_mult = 1.5
+        for rule in family_rules:
+            if (rule.get("rule_type") == "overtime") and isinstance(rule.get("rule_data"), dict):
+                try:
+                    overtime_mult = float(rule["rule_data"].get("multiplier", 1.5))
+                except Exception:
+                    overtime_mult = 1.5
+
+        results: List[QATestResult] = []
+        for i, w in enumerate(synthetic_workers):
+            test_id = f"SMOKE_{i+1:03d}"
+            cls = (w.get("classification") or "").lower()
+            base = rate_map.get(cls, 0.0)
+            hours = float(w.get("hours", 0.0))
+            day = (w.get("day") or "weekday").lower()
+            anomalies: List[str] = []
+            warnings: List[str] = []
+
+            if base <= 0:
+                anomalies.append("Missing base rate for classification")
+
+            hourly = base
+            if day in ("saturday", "sunday"):
+                hourly = base * overtime_mult
+
+            pay = hourly * hours
+            if pay <= 0:
+                warnings.append("Computed pay is zero or negative")
+
+            results.append(
+                QATestResult(
+                    test_id=test_id,
+                    family_id=family_id,
+                    worker_scenario=w,
+                    test_results={"hourly_rate": hourly, "hours": hours, "computed_pay": pay},
+                    anomalies=anomalies,
+                    warnings=warnings,
+                    passed=len(anomalies) == 0,
+                    execution_time_seconds=0.0,
+                )
+            )
+
+        return results
+
+    @log_function_call
+    def export_qa_results(self, results: List[QATestResult], output_path: str) -> None:
+        import json
+        from pathlib import Path
+
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w") as f:
+            json.dump(
+                [
+                    {
+                        "test_id": r.test_id,
+                        "family_id": r.family_id,
+                        "worker_scenario": r.worker_scenario,
+                        "test_results": r.test_results,
+                        "anomalies": r.anomalies,
+                        "warnings": r.warnings,
+                        "passed": r.passed,
+                        "execution_time_seconds": r.execution_time_seconds,
+                    }
+                    for r in results
+                ],
+                f,
+                indent=2,
+            )
+
+
+__all__ = ["QACalculator", "WorkerScenario"]
+
+"""
 QA Calculator for EA Importer - Smoke testing with synthetic scenarios.
 """
 
