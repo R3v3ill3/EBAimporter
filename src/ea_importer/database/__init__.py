@@ -70,8 +70,11 @@ class DatabaseManager:
             raw_hostaddr = str(self.settings.database.hostaddr).strip()
             # Sanitize: keep only digits and dots; reject if anything else appears
             cleaned_hostaddr = re.sub(r"[^0-9\.]", "", raw_hostaddr)
-            if cleaned_hostaddr and cleaned_hostaddr.count(".") >= 1:
+            # Strict IPv4 validation: four octets 0-255
+            ipv4_pattern = re.compile(r"^(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})\.(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})\.(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})\.(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})$")
+            if cleaned_hostaddr and ipv4_pattern.match(cleaned_hostaddr):
                 connect_args["hostaddr"] = cleaned_hostaddr
+                logger.info(f"Using DB_HOSTADDR override: {cleaned_hostaddr}")
             else:
                 logger.warning(
                     f"Ignoring invalid DB_HOSTADDR value: '{raw_hostaddr}'. Expected IPv4 like '1.2.3.4'"
@@ -86,6 +89,7 @@ class DatabaseManager:
                     if infos:
                         ipv4_addr = infos[0][4][0]
                         connect_args["hostaddr"] = ipv4_addr
+                        logger.info(f"Using resolved IPv4 hostaddr: {ipv4_addr}")
         except Exception as e:
             logger.warning(f"IPv4 resolution failed; proceeding without hostaddr: {e}")
 
