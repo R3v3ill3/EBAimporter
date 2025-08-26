@@ -44,6 +44,7 @@ class DatabaseConfig(BaseSettings):
     keepalives_interval: int = Field(default=10, description="Seconds between keepalive probes")
     keepalives_count: int = Field(default=5, description="Number of failed keepalive probes before drop")
     prefer_ipv4: bool = Field(default=False, description="Prefer IPv4 addresses for database connections")
+    hostaddr: Optional[str] = Field(default=None, description="Optional IPv4 host address to bypass DNS/IPv6")
     
     class Config:
         env_prefix = "DB_"
