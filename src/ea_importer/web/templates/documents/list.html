@@ -29,10 +29,15 @@
                     <tr>
                         <td>{{ doc.id }}</td>
                         <td>{{ doc.file_name }}</td>
-                        <td>{{ doc.status }}</td>
+                        <td>
+                            <span class="badge bg-secondary">{{ doc.status }}</span>
+                        </td>
                         <td>{{ doc.created_at.strftime('%Y-%m-%d %H:%M') if doc.created_at }}</td>
                         <td>
                             <a href="/documents/{{ doc.id }}" class="btn btn-sm btn-primary">View</a>
+                            <form method="post" action="/documents/{{ doc.id }}/process" class="d-inline" onsubmit="return triggerProcess(event)">
+                                <button type="submit" class="btn btn-sm btn-outline-secondary">Process</button>
+                            </form>
                         </td>
                     </tr>
                     {% endfor %}
@@ -54,5 +59,22 @@
         </nav>
     </div>
 </div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+async function triggerProcess(e) {
+    e.preventDefault();
+    try {
+        const res = await fetch(e.target.action, { method: 'POST' });
+        if (!res.ok) { alert('Failed to start processing'); return false; }
+        alert('Processing started');
+        location.reload();
+    } catch (err) {
+        alert('Error: ' + err);
+    }
+    return false;
+}
+</script>
 {% endblock %}
 

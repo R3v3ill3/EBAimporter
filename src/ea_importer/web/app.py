@@ -33,6 +33,7 @@ from ..models import (
 )
 from ..utils.pdf_processor import PDFProcessor
 from ..utils.fingerprinter import Fingerprinter
+from ..utils.text_segmenter import TextSegmenter
 from .routes import (
     clustering_router, 
     family_router, 
@@ -263,6 +264,7 @@ def _process_uploaded_document(document_id: Optional[int], file_path: str) -> No
     settings = get_settings()
     processor = PDFProcessor()
     fingerprinter = Fingerprinter()
+    segmenter = TextSegmenter()
     try:
         pdf_doc = processor.process_pdf(Path(file_path))
         ea_id = pdf_doc.metadata.get('ea_id')
@@ -290,6 +292,30 @@ def _process_uploaded_document(document_id: Optional[int], file_path: str) -> No
             doc.has_text_layer = True  # heuristic; refine if needed
             doc.ocr_used = bool(pdf_doc.metadata.get('ocr_used'))
             doc.total_pages = pdf_doc.total_pages
+            # Segment into clauses and persist
+            try:
+                segments = segmenter.segment_document(pdf_doc, ea_id=doc.ea_id)
+                order_index = 0
+                for seg in segments:
+                    order_index += 1
+                    clause = ClauseDB(
+                        document_id=doc.id,
+                        clause_id=str(seg.clause_id),
+                        clause_number=str(seg.clause_id),
+                        heading=seg.heading or None,
+                        text=seg.text,
+                        path_json=seg.path,
+                        level=len(seg.path) if seg.path else 0,
+                        order_index=order_index,
+                        hash_sha256=seg.hash_sha256,
+                        token_count=seg.token_count,
+                        char_count=len(seg.text) if seg.text else 0,
+                        page_spans_json=seg.page_spans,
+                    )
+                    session.add(clause)
+                doc.total_clauses = len(segments)
+            except Exception as se:
+                logger.warning(f"Segmentation failed for {file_path}: {se}")
             doc.status = "completed"
             doc.processed_at = datetime.utcnow()
             # Fingerprint
@@ -316,6 +342,26 @@ def _process_uploaded_document(document_id: Optional[int], file_path: str) -> No
                         doc.status = "failed"
         except Exception:
             pass
+
+
+@app.post("/documents/{document_id}/process")
+async def process_document_endpoint(document_id: int, background_tasks: BackgroundTasks):
+    """Trigger background processing or reprocessing for a document."""
+    try:
+        with get_db_session() as session:
+            doc = session.query(DocumentDB).filter(DocumentDB.id == document_id).first()
+            if not doc:
+                raise HTTPException(status_code=404, detail="Document not found")
+            # Update status to processing
+            doc.status = "processing"
+            file_path = doc.file_path
+        background_tasks.add_task(_process_uploaded_document, document_id, file_path)
+        return {"success": True, "message": "Processing started", "document_id": document_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to start processing for document {document_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to start processing")
 
 
 @app.post("/upload")
