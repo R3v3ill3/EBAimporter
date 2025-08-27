@@ -30,13 +30,13 @@ class ClusteringAlgorithm(str, Enum):
 class DatabaseConfig(BaseSettings):
     """Database configuration settings"""
     url: str = Field(
-        default="postgresql://localhost:5432/ea_importer",
+        default_factory=lambda: (os.getenv("DATABASE_URL") or "postgresql://localhost:5432/ea_importer"),
         description="Database connection URL"
     )
     echo: bool = Field(default=False, description="Enable SQLAlchemy query logging")
     pool_size: int = Field(default=10, description="Connection pool size")
     max_overflow: int = Field(default=20, description="Maximum pool overflow")
-    sslmode: str = Field(default="prefer", description="PostgreSQL SSL mode (e.g., require, prefer)")
+    sslmode: str = Field(default_factory=lambda: (os.getenv("PGSSLMODE") or "prefer"), description="PostgreSQL SSL mode (e.g., require, prefer)")
     connect_timeout: int = Field(default=10, description="Connection timeout in seconds")
     pool_recycle: int = Field(default=1800, description="Recycle connections after this many seconds")
     keepalives: bool = Field(default=True, description="Enable TCP keepalives")

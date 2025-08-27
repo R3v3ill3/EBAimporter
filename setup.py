@@ -78,9 +78,7 @@ setup(
     entry_points={
         'console_scripts': [
             'ea-importer=ea_importer.cli:main',
-            'ea-ingest=ea_importer.cli:ingest_main',
-            'ea-cluster=ea_importer.cli:cluster_main',
-            'ea-web=ea_importer.web:run_web',
+            'ea-web=ea_importer.web.app:run_server',
         ],
     },
     

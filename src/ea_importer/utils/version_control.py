@@ -1,4 +1,122 @@
 """
+Version control utilities for EA Importer.
+
+Creates simple, immutable manifests and exports of families/instances to a
+versioned directory, with checksum support.
+"""
+
+from __future__ import annotations
+
+import json
+import hashlib
+from pathlib import Path
+from typing import Dict, Any, Tuple, List
+from datetime import datetime
+
+from ..core.logging import get_logger, log_function_call
+from ..models import VersionManifest
+
+
+logger = get_logger(__name__)
+
+
+def _sha256_of_bytes(data: bytes) -> str:
+    h = hashlib.sha256()
+    h.update(data)
+    return h.hexdigest()
+
+
+class VersionController:
+    """Basic version control: manifest generation and export."""
+
+    @log_function_call
+    def create_version(
+        self,
+        version_name: str,
+        families_data: Dict[str, Any],
+        instances_data: Dict[str, Any],
+        notes: str | None = None,
+    ) -> VersionManifest:
+        checksums: Dict[str, str] = {}
+        # Hash canonical JSON of each family/instance
+        for fid, fdata in families_data.items():
+            checksums[f"family:{fid}"] = _sha256_of_bytes(json.dumps(fdata, sort_keys=True).encode("utf-8"))
+        for iid, idata in instances_data.items():
+            checksums[f"instance:{iid}"] = _sha256_of_bytes(json.dumps(idata, sort_keys=True).encode("utf-8"))
+
+        manifest = VersionManifest(
+            version=version_name,
+            created_at=datetime.utcnow(),
+            locked_at=None,
+            commit_sha=None,
+            families_count=len(families_data),
+            instances_count=len(instances_data),
+            checksums=checksums,
+            notes=notes,
+        )
+        return manifest
+
+    @log_function_call
+    def save_version(
+        self,
+        manifest: VersionManifest,
+        families_data: Dict[str, Any],
+        instances_data: Dict[str, Any],
+        versions_dir: Path,
+    ) -> Path:
+        target = versions_dir / manifest.version
+        target.mkdir(parents=True, exist_ok=True)
+
+        # Save manifest
+        manifest_path = target / "manifest.json"
+        with open(manifest_path, "w") as f:
+            json.dump(
+                {
+                    "version": manifest.version,
+                    "created_at": manifest.created_at.isoformat(),
+                    "locked_at": manifest.locked_at.isoformat() if manifest.locked_at else None,
+                    "commit_sha": manifest.commit_sha,
+                    "families_count": manifest.families_count,
+                    "instances_count": manifest.instances_count,
+                    "checksums": manifest.checksums,
+                    "notes": manifest.notes,
+                },
+                f,
+                indent=2,
+            )
+
+        # Save families
+        fam_dir = target / "families"
+        fam_dir.mkdir(exist_ok=True)
+        for fid, fdata in families_data.items():
+            with open(fam_dir / f"{fid}.json", "w") as f:
+                json.dump(fdata, f, indent=2)
+
+        # Save instances
+        inst_dir = target / "instances"
+        inst_dir.mkdir(exist_ok=True)
+        for iid, idata in instances_data.items():
+            with open(inst_dir / f"{iid}.json", "w") as f:
+                json.dump(idata, f, indent=2)
+
+        logger.info(f"Saved version {manifest.version} to {target}")
+        return target
+
+    @log_function_call
+    def list_versions(self, versions_dir: Path) -> List[Dict[str, Any]]:
+        if not versions_dir.exists():
+            return []
+        versions = []
+        for child in sorted(versions_dir.iterdir()):
+            if child.is_dir() and (child / "manifest.json").exists():
+                try:
+                    with open(child / "manifest.json", "r") as f:
+                        versions.append(json.load(f))
+                except Exception:
+                    continue
+        return versions
+
+"""
 Version Control for EA Importer - Corpus versioning and locking.
 """
 

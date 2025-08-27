@@ -11,6 +11,9 @@ from .fingerprinter import (
     Fingerprinter, LSHIndex, TextPreprocessor, FingerprintingError,
     fingerprint_documents_batch, save_fingerprints_batch
 )
+from .rates_rules_extractor import RatesRulesExtractor
+from .qa_calculator import QACalculator
+from .version_control import VersionController
 
 # Export all main classes and functions
 __all__ = [
@@ -39,6 +42,11 @@ __all__ = [
     'FingerprintingError',
     'fingerprint_documents_batch',
     'save_fingerprints_batch',
+    
+    # Extraction & QA
+    'RatesRulesExtractor',
+    'QACalculator',
+    'VersionController',
 ]
 
 

@@ -356,5 +356,15 @@ def main():
     """Main CLI entry point."""
     app()
 
+# Optional convenience wrappers referenced in older docs/entrypoints
+def ingest_main():
+    main()
+
+def cluster_main():
+    main()
+
+def web_main():
+    main()
+
 if __name__ == "__main__":
     main()

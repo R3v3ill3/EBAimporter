@@ -15,9 +15,9 @@ from ...core.logging import get_logger
 from ...database import get_db_session
 from ...models import (
     DocumentDB, ClusterCandidateDB, FamilyDB, ClauseDB,
-    ClusterCandidate, ClusterConfidence
 )
 from ...pipeline.clustering import ClusteringEngine
+from ...utils.fingerprinter import Fingerprinter
 from ...pipeline.family_builder import FamilyBuilder
 
 logger = get_logger(__name__)
@@ -271,46 +271,69 @@ async def recalculate_clusters(
     
     try:
         clustering_engine = ClusteringEngine()
-        
-        # Get all documents
+        fingerprinter = Fingerprinter()
+
+        # Get all documents that have fingerprints
         with get_db_session() as session:
-            documents = session.query(DocumentDB).all()
-            
-            if not documents:
+            docs = session.query(DocumentDB).all()
+            if not docs:
                 raise HTTPException(status_code=400, detail="No documents found")
-            
-            # Recalculate clusters
-            cluster_results = clustering_engine.cluster_documents(
-                documents,
-                algorithm=algorithm,
-                similarity_threshold=similarity_threshold,
-                min_cluster_size=min_cluster_size
-            )
-            
+
+            # Load fingerprints for documents
+            from ...models import FingerprintDB as FPDB
+            fps_map = {}
+            for doc in docs:
+                fp_row = session.query(FPDB).filter(FPDB.document_id == doc.id).first()
+                if not fp_row:
+                    continue
+                # Build pydantic DocumentFingerprint
+                from ...models import DocumentFingerprint as FP
+                fps_map[doc.ea_id] = FP(
+                    ea_id=doc.ea_id,
+                    minhash_signature=fp_row.minhash_signature,
+                    embedding_vector=None,
+                )
+
+            if not fps_map:
+                raise HTTPException(status_code=400, detail="No fingerprints found")
+
+            fps_list = list(fps_map.values())
+            clusters = clustering_engine.cluster_documents(fps_list, algorithm)
+
             # Clear existing candidates and create new ones
             session.query(ClusterCandidateDB).delete()
-            
-            for cluster in cluster_results:
-                candidate = ClusterCandidateDB(
-                    document_ids=cluster.document_ids,
-                    confidence_score=cluster.confidence_score,
-                    similarity_scores=cluster.similarity_scores,
-                    clustering_algorithm=algorithm,
-                    clustering_parameters={
-                        "similarity_threshold": similarity_threshold,
-                        "min_cluster_size": min_cluster_size
-                    },
-                    review_status='pending'
-                )
-                session.add(candidate)
-            
+
+            # Map EA IDs to DB document IDs
+            ea_to_id = {d.ea_id: d.id for d in docs}
+
+            created = 0
+            for _, ea_ids in clusters.items():
+                doc_ids = [ea_to_id.get(ea) for ea in ea_ids if ea in ea_to_id]
+                if not doc_ids:
+                    continue
+                # Compute confidence as average pairwise MinHash similarity
+                sims = []
+                for i in range(len(ea_ids)):
+                    for j in range(i + 1, len(ea_ids)):
+                        fp1 = fps_map.get(ea_ids[i])
+                        fp2 = fps_map.get(ea_ids[j])
+                        if fp1 and fp2:
+                            sims.append(fingerprinter.calculate_similarity(fp1, fp2))
+                confidence = sum(sims) / len(sims) if sims else 0.0
+                session.add(ClusterCandidateDB(
+                    document_ids=doc_ids,
+                    confidence_score=float(confidence),
+                    review_status='pending',
+                ))
+                created += 1
+
             session.commit()
-            
-        logger.info(f"Recalculated clusters: {len(cluster_results)} candidates created")
-        
+
+        logger.info(f"Recalculated clusters: {created} candidates created")
+
         return JSONResponse({
             "success": True,
-            "clusters_created": len(cluster_results),
+            "clusters_created": created,
             "algorithm": algorithm,
             "parameters": {
                 "similarity_threshold": similarity_threshold,
@@ -326,24 +349,37 @@ async def recalculate_clusters(
 
 
 def _calculate_similarity_matrix(documents: List[DocumentDB]) -> List[List[float]]:
-    """Calculate similarity matrix for visualization"""
-    
-    # Simplified similarity calculation for demo
-    # In production, this would use the actual fingerprinting system
-    matrix = []
-    
-    for i, doc1 in enumerate(documents):
-        row = []
-        for j, doc2 in enumerate(documents):
-            if i == j:
-                similarity = 1.0
+    """Calculate similarity matrix using stored fingerprints."""
+    from ...database import get_db_session
+    from ...models import FingerprintDB as FPDB
+    from ...models import DocumentFingerprint as FP
+
+    fingerprinter = Fingerprinter()
+    matrix: List[List[float]] = []
+    fps: List[Optional[FP]] = []
+
+    with get_db_session() as session:
+        for doc in documents:
+            fp_row = session.query(FPDB).filter(FPDB.document_id == doc.id).first()
+            if fp_row:
+                fps.append(FP(ea_id=doc.ea_id, minhash_signature=fp_row.minhash_signature, embedding_vector=None))
             else:
-                # Placeholder similarity calculation
-                # Would use actual fingerprint comparison
-                similarity = 0.8 + (hash(f"{doc1.id}-{doc2.id}") % 20) / 100
-            row.append(round(similarity, 3))
+                fps.append(None)
+
+    n = len(documents)
+    for i in range(n):
+        row: List[float] = []
+        for j in range(n):
+            if i == j:
+                row.append(1.0)
+                continue
+            if fps[i] and fps[j]:
+                sim = fingerprinter.calculate_similarity(fps[i], fps[j])
+            else:
+                sim = 0.0
+            row.append(round(float(sim), 3))
         matrix.append(row)
-    
+
     return matrix
 
 
