@@ -47,8 +47,7 @@ except Exception:
 
 try:
     from ..models import Document as DocumentDB  # type: ignore
-    from ..models import IngestRun as BatchImportJob  # type: ignore
-    from ..models import Clause as BatchImportResult  # type: ignore
+    from ..models import BatchImportJob, BatchImportResult  # type: ignore
     DB_MODELS_AVAILABLE = True
 except Exception:
     DocumentDB = None  # type: ignore
@@ -536,13 +535,17 @@ class CSVBatchImporter:
     def _sync_process_document(self, document_id: int, file_path: Path) -> None:
         """Synchronous document processing for executor."""
         
-        # This would integrate with the main ingest pipeline
-        # For now, we'll update the status
-        with get_db_session() as session:
-            document = session.query(DocumentDB).filter(DocumentDB.id == document_id).first()
-            if document:
-                document.processing_status = 'processed'
-                session.commit()
+        # Placeholder that marks document as completed in DB if available
+        if get_db_session and DocumentDB:
+            try:
+                with get_db_session() as session:  # type: ignore[arg-type]
+                    document = session.query(DocumentDB).filter(DocumentDB.id == document_id).first()
+                    if document:
+                        setattr(document, 'status', 'completed')
+                        session.commit()
+            except Exception:
+                # Swallow DB errors to avoid crashing background processing
+                return
     
     async def _update_job_progress(self, job_id: int) -> None:
         """Update job progress statistics."""
