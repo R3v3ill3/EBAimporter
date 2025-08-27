@@ -117,6 +117,12 @@ ea-importer web --port 8080
 # Import from CSV with URLs
 ea-importer csv import ea_urls.csv
 
+# Validate a CSV without importing
+ea-importer csv validate ea_urls.csv
+
+# Retry only failed rows from a previous job
+ea-importer csv retry-failed 123 --name "Retry 123"
+
 # Run comprehensive tests
 ea-importer test all
 ```
@@ -143,6 +149,7 @@ ea-importer cluster run --algorithm adaptive --threshold 0.85
 # Review in web interface
 ea-importer web --port 8080
 # Navigate to http://localhost:8080/clustering
+# CSV Batch Import UI at http://localhost:8080/imports
 
 # Bulk approve high-confidence clusters
 ea-importer cluster approve --confidence-min 0.95

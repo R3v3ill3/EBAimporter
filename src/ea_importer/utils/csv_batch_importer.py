@@ -84,6 +84,8 @@ class CSVBatchImporter:
         self.text_segmenter = TextSegmenter()
         self.fingerprinter = Fingerprinter()
         self._db_enabled = DB_SESSION_AVAILABLE and DB_MODELS_AVAILABLE
+        self.max_retries = 3
+        self.backoff_base_seconds = 0.5
         
         # Create download directory
         self.download_dir = Path(self.settings.paths.upload_dir) / "batch_downloads"
@@ -176,13 +178,13 @@ class CSVBatchImporter:
             
             logger.info(f"Found {len(csv_records)} records in CSV file")
             
-            # Build skip set for resume/dedup when DB available
+            # Build skip set for resume/dedup when DB available (across all jobs)
             skip_urls = set()
             if self._db_enabled and get_db_session and BatchImportResult and BatchImportJob:
                 try:
                     with get_db_session() as session:  # type: ignore[arg-type]
                         prior = session.query(BatchImportResult).filter(
-                            BatchImportResult.job_id == getattr(job, 'id', 0)
+                            BatchImportResult.status == 'success'
                         ).all()
                         for r in prior:
                             if getattr(r, 'status', '') == 'success' and getattr(r, 'source_url', None):
@@ -377,29 +379,54 @@ class CSVBatchImporter:
                 filename = f"{safe_title}_{url_hash}.pdf"
                 file_path = self.download_dir / filename
                 
-                # Download PDF
-                logger.info(f"Downloading: {record['url']}")
-                await self._download_pdf(http_session, record['url'], file_path)
+                # Download PDF with retries
+                last_err: Optional[Exception] = None
+                for attempt in range(1, self.max_retries + 1):
+                    try:
+                        logger.info(f"[job={job_id} row={record['row_number']}] Downloading (attempt {attempt}): {record['url']}")
+                        await self._download_pdf(http_session, record['url'], file_path)
+                        last_err = None
+                        break
+                    except Exception as e:
+                        last_err = e
+                        backoff = self.backoff_base_seconds * (2 ** (attempt - 1))
+                        logger.warning(f"[job={job_id} row={record['row_number']}] Download failed: {e}; retrying in {backoff:.1f}s")
+                        await asyncio.sleep(backoff)
+                if last_err is not None:
+                    raise last_err
                 
                 # Validate PDF
                 if not await self._validate_pdf(file_path):
                     raise ValueError("Downloaded file is not a valid PDF")
                 
-                document_id = None
+                # Compute checksum for dedup
+                checksum_sha256 = self._compute_sha256(file_path)
+                document_id: Optional[int] = None
+                existing_doc = None
                 if self._db_enabled and get_db_session and DocumentDB:
                     with get_db_session() as session:  # type: ignore[arg-type]
-                        document = DocumentDB(
-                            file_path=str(file_path),
-                            original_filename=filename,
-                            file_size_bytes=file_path.stat().st_size,
-                            status=record['status'],
-                            fwc_id=record['fwc_code'],
-                            title=record['title'],
-                            jurisdiction=None,
-                        )  # type: ignore[call-arg]
-                        session.add(document)
-                        session.flush()
-                        document_id = document.id
+                        try:
+                            existing_doc = session.query(DocumentDB).filter(  # type: ignore[call-arg]
+                                DocumentDB.checksum_sha256 == checksum_sha256
+                            ).first()
+                        except Exception:
+                            existing_doc = None
+                        if existing_doc:
+                            document_id = existing_doc.id
+                        else:
+                            document = DocumentDB(  # type: ignore[call-arg]
+                                file_path=str(file_path),
+                                original_filename=filename,
+                                file_size_bytes=file_path.stat().st_size,
+                                checksum_sha256=checksum_sha256,
+                                status=record['status'],
+                                fwc_id=record['fwc_code'],
+                                title=record['title'],
+                                jurisdiction=None,
+                            )
+                            session.add(document)
+                            session.flush()
+                            document_id = document.id
                 
                 # Auto-process if enabled
                 if auto_process:
@@ -450,6 +477,18 @@ class CSVBatchImporter:
                     processing_status = 'downloaded'
                     error_message = None
                 
+                # On successful processing, move file into canonical raw PDF store
+                try:
+                    if processing_status == 'completed':
+                        raw_dir = Path(self.settings.paths.raw_pdfs_dir)
+                        raw_dir.mkdir(parents=True, exist_ok=True)
+                        target_name = f"{document.metadata.get('ea_id') or checksum_sha256}.pdf"
+                        target_path = raw_dir / target_name
+                        if not target_path.exists():
+                            file_path.replace(target_path)
+                except Exception:
+                    pass
+
                 # Create result record or simple dict
                 if self._db_enabled and get_db_session and BatchImportResult:
                     result = BatchImportResult(  # type: ignore[call-arg]
@@ -467,6 +506,7 @@ class CSVBatchImporter:
                             result.processing_time_seconds = time.time() - start_time
                         except Exception:
                             pass
+                        # If deduped, there may be no new Document; still record success
                         session.add(result)
                         session.commit()
                     logger.info(f"Successfully processed: {record['title']}")
@@ -546,6 +586,15 @@ class CSVBatchImporter:
                 return header.startswith(b'%PDF-')
         except Exception:
             return False
+
+    def _compute_sha256(self, file_path: Path) -> str:
+        """Compute SHA256 checksum for a file."""
+        import hashlib as _hashlib
+        h = _hashlib.sha256()
+        with open(file_path, 'rb') as f:
+            for chunk in iter(lambda: f.read(8192), b''):
+                h.update(chunk)
+        return h.hexdigest()
     
     async def _process_document(self, document_id: int, file_path: Path) -> None:
         """Process downloaded document through the ingestion pipeline."""
