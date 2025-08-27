@@ -69,6 +69,47 @@ class IngestRun(Base):
     documents = relationship("Document", back_populates="ingest_run")
 
 
+class BatchImportJob(Base):
+    """Track CSV/URL batch import jobs"""
+    __tablename__ = "batch_import_jobs"
+
+    id = Column(Integer, primary_key=True)
+    job_name = Column(String(255), nullable=False)
+    source_type = Column(String(50))  # csv | fwc | url_list
+    source_path = Column(String(500))
+    status = Column(String(20), default=ProcessingStatus.PENDING.value)
+    total_items = Column(Integer, default=0)
+    processed_items = Column(Integer, default=0)
+    successful_items = Column(Integer, default=0)
+    failed_items = Column(Integer, default=0)
+    settings = Column(JSON)
+    error_message = Column(Text)
+    created_at = Column(DateTime, default=func.now())
+    completed_at = Column(DateTime)
+
+    # Relationships
+    results = relationship("BatchImportResult", back_populates="job", cascade="all, delete-orphan")
+
+
+class BatchImportResult(Base):
+    """Per-row results for batch import jobs"""
+    __tablename__ = "batch_import_results"
+
+    id = Column(Integer, primary_key=True)
+    job_id = Column(Integer, ForeignKey("batch_import_jobs.id"), nullable=False)
+    row_number = Column(Integer)
+    source_url = Column(Text)
+    status = Column(String(20))  # success | failed
+    error_message = Column(Text)
+    file_path = Column(String(500))
+    file_size_bytes = Column(Integer)
+    processing_time_seconds = Column(Float)
+    created_at = Column(DateTime, default=func.now())
+
+    # Relationships
+    job = relationship("BatchImportJob", back_populates="results")
+
+
 class Document(Base):
     """Represents a processed EA document"""
     __tablename__ = "documents"

@@ -41,6 +41,7 @@ from .routes import (
     qa_router,
     monitoring_router
 )
+from .routes.imports import router as imports_router
 
 logger = get_logger(__name__)
 
@@ -79,6 +80,7 @@ templates_dir = Path(__file__).parent / "templates"
 static_dir = Path(__file__).parent / "static"
 
 templates = Jinja2Templates(directory=str(templates_dir))
+app.state.templates = templates
 
 # Mount static files
 if static_dir.exists():
@@ -90,6 +92,7 @@ app.include_router(family_router, prefix="/families", tags=["families"])
 app.include_router(instance_router, prefix="/instances", tags=["instances"])
 app.include_router(qa_router, prefix="/qa", tags=["qa"])
 app.include_router(monitoring_router, prefix="/monitoring", tags=["monitoring"])
+app.include_router(imports_router, prefix="/imports", tags=["imports"])
 
 
 def _format_bytes(num_bytes: int) -> str:

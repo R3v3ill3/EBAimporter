@@ -101,16 +101,30 @@ class DatabaseManager:
 
         logger.info(f"Database connect args: {_mask_args(connect_args)}")
 
-        # Create engine with connection pooling
-        self.engine = create_engine(
-            self.database_url,
-            echo=self.settings.database.echo,
-            pool_size=self.settings.database.pool_size,
-            max_overflow=self.settings.database.max_overflow,
-            pool_pre_ping=True,  # Verify connections before use
-            pool_recycle=self.settings.database.pool_recycle,
-            connect_args=connect_args,
-        )
+        # Create engine with appropriate options per backend
+        engine_kwargs = {
+            'echo': self.settings.database.echo,
+            'pool_pre_ping': True,
+            'pool_recycle': self.settings.database.pool_recycle,
+            'connect_args': connect_args,
+            'pool_size': self.settings.database.pool_size,
+            'max_overflow': self.settings.database.max_overflow,
+        }
+        try:
+            url_obj = make_url(self.database_url)
+            backend = url_obj.get_backend_name()
+            if backend == 'sqlite':
+                # SQLite does not support pool_size/max_overflow
+                engine_kwargs.pop('pool_size', None)
+                engine_kwargs.pop('max_overflow', None)
+                # Allow cross-thread usage; for in-memory, use StaticPool
+                engine_kwargs['connect_args'] = {'check_same_thread': False}
+                if (url_obj.database or '').strip() in ('', ':memory:'):
+                    engine_kwargs['poolclass'] = StaticPool
+        except Exception:
+            pass
+
+        self.engine = create_engine(self.database_url, **engine_kwargs)
         
         # Create session factory
         self.SessionLocal = sessionmaker(
@@ -364,14 +378,16 @@ def setup_database() -> None:
     # Initialize connection
     db_manager.initialize()
     
-    # Check if tables exist
-    table_info = db_manager.get_table_info()
-    
-    if not table_info:
-        logger.info("No existing tables found, creating new database schema")
+    # Create/upgrade tables (create_all is additive and safe to call repeatedly)
+    try:
         db_manager.create_tables()
-    else:
-        logger.info(f"Found existing tables: {list(table_info.keys())}")
+    except Exception as e:
+        logger.error(f"Table creation failed: {e}")
+        raise
+    
+    # Log existing tables after ensuring schema is applied
+    table_info = db_manager.get_table_info()
+    logger.info(f"Existing tables: {list(table_info.keys())}")
     
     # Test connection
     if db_manager.test_connection():

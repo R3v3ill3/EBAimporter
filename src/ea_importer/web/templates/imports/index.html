@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center pt-3 pb-2 mb-3 border-bottom">
+    <h1 class="h2"><i class="fas fa-file-import me-2"></i>CSV Batch Import</h1>
+</div>
+
+<div class="row">
+    <div class="col-md-6">
+        <div class="card mb-4">
+            <div class="card-header">Upload CSV</div>
+            <div class="card-body">
+                <form action="/imports/upload" method="post" enctype="multipart/form-data">
+                    <div class="mb-3">
+                        <label for="file" class="form-label">CSV File</label>
+                        <input class="form-control" type="file" id="file" name="file" accept=".csv" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Job Name (optional)</label>
+                        <input class="form-control" type="text" name="job_name" placeholder="My Import Job">
+                    </div>
+                    <div class="mb-3 form-check">
+                        <input class="form-check-input" type="checkbox" id="auto_process" name="auto_process" checked>
+                        <label class="form-check-label" for="auto_process">Auto-process downloaded PDFs</label>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Max Concurrency</label>
+                        <input class="form-control" type="number" name="max_concurrent" value="{{ default_concurrency }}" min="1" max="16">
+                    </div>
+                    <button type="submit" class="btn btn-primary"><i class="fas fa-play me-2"></i>Start Import</button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-6">
+        <div class="card mb-4">
+            <div class="card-header">Paste URLs</div>
+            <div class="card-body">
+                <form action="/imports/urls" method="post">
+                    <div class="mb-3">
+                        <label class="form-label">One URL per line</label>
+                        <textarea class="form-control" name="urls_text" rows="8" placeholder="https://example.com/a.pdf\nhttps://example.com/b.pdf" required></textarea>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Job Name (optional)</label>
+                        <input class="form-control" type="text" name="job_name" placeholder="URL List Import">
+                    </div>
+                    <div class="mb-3 form-check">
+                        <input class="form-check-input" type="checkbox" id="auto_process2" name="auto_process" checked>
+                        <label class="form-check-label" for="auto_process2">Auto-process downloaded PDFs</label>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Max Concurrency</label>
+                        <input class="form-control" type="number" name="max_concurrent" value="{{ default_concurrency }}" min="1" max="16">
+                    </div>
+                    <button type="submit" class="btn btn-secondary"><i class="fas fa-play me-2"></i>Start Import</button>
+                </form>
+            </div>
+        </div>
+
+        <div class="text-end">
+            <a href="/imports/jobs" class="btn btn-outline-primary"><i class="fas fa-list me-2"></i>View Jobs</a>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
