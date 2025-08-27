@@ -391,3 +391,58 @@ def create_template(
 
 
 __all__ = ['csv_app']
+ 
+# ------------------ Enhancements ------------------
+@csv_app.command("validate")
+def validate_csv(
+    csv_file: str = typer.Argument(..., help="Path to CSV to validate")
+):
+    """Validate CSV headers and URL formats without importing."""
+    from ..utils.csv_batch_importer import CSVBatchImporter
+    import asyncio as _asyncio
+    console.print(Panel(f"Validating CSV: {csv_file}", title="CSV Validate"))
+    async def _run():
+        importer = CSVBatchImporter()
+        records = await importer._parse_csv_file(csv_file)  # type: ignore[attr-defined]
+        bad_urls = [r for r in records if not importer._is_valid_url(r['url'])]  # type: ignore[attr-defined]
+        console.print(f"[green]✓ Parsed {len(records)} records[/green]")
+        if bad_urls:
+            console.print(f"[yellow]Found {len(bad_urls)} invalid URLs[/yellow]")
+    _asyncio.run(_run())
+
+
+@csv_app.command("retry-failed")
+def retry_failed_cli(
+    job_id: int = typer.Argument(..., help="Existing job ID to retry failed rows from"),
+    job_name: Optional[str] = typer.Option(None, "--name", "-n", help="New job name")
+):
+    """Create a new job from failed rows of an existing job."""
+    if not _DB_AVAILABLE:
+        console.print("[red]Database not available. Cannot retry failed without DB.[/red]")
+        raise typer.Exit(1)
+    from ..database import get_db_session as _get_db_session
+    from ..models import BatchImportResult as _BatchImportResult
+    import tempfile as _tempfile
+
+    with _get_db_session() as session:  # type: ignore[arg-type]
+        failed = session.query(_BatchImportResult).filter(
+            _BatchImportResult.job_id == job_id, _BatchImportResult.status == 'failed'
+        ).all()
+        if not failed:
+            console.print("[yellow]No failed items to retry[/yellow]")
+            raise typer.Exit(0)
+
+    with _tempfile.NamedTemporaryFile(delete=False, suffix='.csv', mode='w', newline='', encoding='utf-8') as tmp:
+        writer = csv.writer(tmp)
+        writer.writerow(['url', 'title'])
+        for i, r in enumerate(failed, start=1):
+            writer.writerow([r.source_url, f'Retry_{i}'])
+        csv_path = tmp.name
+
+    console.print(Panel(f"Starting retry job from {len(failed)} failed rows", title="Retry Failed"))
+    import asyncio as _asyncio
+    async def _run():
+        importer = CSVBatchImporter()
+        job = await importer.import_from_csv(csv_file_path=csv_path, job_name=job_name or f"Retry {job_id}")
+        console.print(f"[green]✓ Retry job started. Job ID: {getattr(job, 'id', 0)}[/green]")
+    _asyncio.run(_run())

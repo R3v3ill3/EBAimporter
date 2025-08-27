@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center pt-3 pb-2 mb-3 border-bottom">
+    <h1 class="h2"><i class="fas fa-tasks me-2"></i>Job {{ job.id }} - {{ job.job_name }}</h1>
+    <div>
+        <form action="/imports/jobs/{{ job.id }}/cancel" method="post" class="d-inline">
+            <button class="btn btn-outline-danger" {% if job.status != 'running' %}disabled{% endif %}>
+                <i class="fas fa-stop me-2"></i>Cancel
+            </button>
+        </form>
+        <form action="/imports/jobs/{{ job.id }}/retry-failed" method="post" class="d-inline ms-2">
+            <button class="btn btn-warning">
+                <i class="fas fa-redo me-2"></i>Retry Failed
+            </button>
+        </form>
+        <a href="/imports/jobs" class="btn btn-secondary ms-2">Back</a>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-md-6">
+        <div class="card mb-4">
+            <div class="card-header">Overview</div>
+            <div class="card-body">
+                <dl class="row mb-0">
+                    <dt class="col-sm-4">Status</dt>
+                    <dd class="col-sm-8" id="job-status">{{ job.status }}</dd>
+                    <dt class="col-sm-4">Progress</dt>
+                    <dd class="col-sm-8"><span id="job-progress">{{ job.processed_items }}</span>/<span id="job-total">{{ job.total_items }}</span></dd>
+                    <dt class="col-sm-4">Success</dt>
+                    <dd class="col-sm-8" id="job-success">{{ job.successful_items }}</dd>
+                    <dt class="col-sm-4">Failed</dt>
+                    <dd class="col-sm-8" id="job-failed">{{ job.failed_items }}</dd>
+                </dl>
+                <div class="progress mt-3" style="height: 20px;">
+                    <div class="progress-bar" id="progress-bar" role="progressbar" style="width: 0%">0%</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-6">
+        <div class="card mb-4">
+            <div class="card-header">Recent Failures</div>
+            <div class="card-body">
+                {% if recent_failed %}
+                <ul class="list-group">
+                    {% for r in recent_failed %}
+                    <li class="list-group-item">
+                        <div class="fw-bold">Row {{ r.row_number }}</div>
+                        <div class="text-truncate">{{ r.source_url }}</div>
+                        <div class="text-danger small">{{ r.error_message }}</div>
+                    </li>
+                    {% endfor %}
+                </ul>
+                {% else %}
+                <p class="text-muted mb-0">No recent failures.</p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+function updateStatus() {
+    fetch('/imports/api/jobs/{{ job.id }}')
+      .then(r => r.json())
+      .then(data => {
+        document.getElementById('job-status').innerText = data.status;
+        document.getElementById('job-progress').innerText = data.processed_items;
+        document.getElementById('job-total').innerText = data.total_items;
+        document.getElementById('job-success').innerText = data.successful_items;
+        document.getElementById('job-failed').innerText = data.failed_items;
+        const total = Math.max(1, data.total_items);
+        const pct = Math.round((data.processed_items / total) * 100);
+        const bar = document.getElementById('progress-bar');
+        bar.style.width = pct + '%';
+        bar.innerText = pct + '%';
+      })
+      .catch(() => {});
+}
+setInterval(updateStatus, 2000);
+updateStatus();
+</script>
+{% endblock %}
+

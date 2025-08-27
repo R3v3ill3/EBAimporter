@@ -176,6 +176,20 @@ class CSVBatchImporter:
             
             logger.info(f"Found {len(csv_records)} records in CSV file")
             
+            # Build skip set for resume/dedup when DB available
+            skip_urls = set()
+            if self._db_enabled and get_db_session and BatchImportResult and BatchImportJob:
+                try:
+                    with get_db_session() as session:  # type: ignore[arg-type]
+                        prior = session.query(BatchImportResult).filter(
+                            BatchImportResult.job_id == getattr(job, 'id', 0)
+                        ).all()
+                        for r in prior:
+                            if getattr(r, 'status', '') == 'success' and getattr(r, 'source_url', None):
+                                skip_urls.add(r.source_url)
+                except Exception:
+                    pass
+
             # Process records with concurrency control
             semaphore = asyncio.Semaphore(self.max_concurrent)
             
@@ -183,10 +197,14 @@ class CSVBatchImporter:
                 timeout=aiohttp.ClientTimeout(total=self.session_timeout)
             ) as http_session:
                 
-                tasks = [
-                    self._process_csv_record(semaphore, http_session, getattr(job, 'id', 0), record, auto_process)
-                    for record in csv_records
-                ]
+                tasks = []
+                for record in csv_records:
+                    if record['url'] in skip_urls:
+                        logger.info(f"Skipping already processed URL: {record['url']}")
+                        continue
+                    tasks.append(
+                        self._process_csv_record(semaphore, http_session, getattr(job, 'id', 0), record, auto_process)
+                    )
                 
                 # Process with progress tracking
                 completed_tasks = 0
@@ -442,6 +460,13 @@ class CSVBatchImporter:
                         # Store limited info; schema differs from ORM here
                     )
                     with get_db_session() as session:  # type: ignore[arg-type]
+                        # Attach basic metrics when available
+                        try:
+                            result.file_path = str(file_path)
+                            result.file_size_bytes = file_path.stat().st_size
+                            result.processing_time_seconds = time.time() - start_time
+                        except Exception:
+                            pass
                         session.add(result)
                         session.commit()
                     logger.info(f"Successfully processed: {record['title']}")
@@ -467,6 +492,7 @@ class CSVBatchImporter:
                         row_number=record['row_number'],
                         source_url=record['url'],
                         status='failed',
+                        error_message=str(e),
                     )
                     with get_db_session() as session:  # type: ignore[arg-type]
                         session.add(result)
